@@ -1,0 +1,1205 @@
+package com.uniroot.app.engine
+
+import android.content.Context
+import android.content.SharedPreferences
+import android.os.Build
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
+import org.json.JSONArray
+import org.json.JSONObject
+import rikka.shizuku.Shizuku
+import java.io.BufferedReader
+import java.io.File
+import java.io.FileOutputStream
+import java.io.InputStreamReader
+
+class RootEngine(private val context: Context) {
+
+    private val _logLines = MutableStateFlow<List<String>>(emptyList())
+    val logLines: StateFlow<List<String>> = _logLines
+    private val _running = MutableStateFlow(false)
+    val running: StateFlow<Boolean> = _running
+    private val _rooted = MutableStateFlow(false)
+    val rooted: StateFlow<Boolean> = _rooted
+    val profiles = mutableListOf<DeviceProfile>()
+    private val prefs: SharedPreferences = context.getSharedPreferences("uniroot_prefs", Context.MODE_PRIVATE)
+
+    private val gitHub = GitHubSupport(context)
+
+    companion object {
+        @Volatile var crashHandlerInstalled = false
+
+        /** profiles_json marker: key injected, helper install pending after the soft reboot. */
+        const val INSTANT_STAGE_INJECTED = "injected"
+
+        /** Same, but the toast was already shown once — notification only from now on. */
+        const val INSTANT_STAGE_QUIET = "injected_quiet"
+
+        /**
+         * Profiles whose payload runs through the Shizuku shell (UID 2000):
+         * S26 Ultra (6.12.69) and Z Fold 8 / F976X (6.12.58). Their h8q-family
+         * preloads need a live shell host — the app-forced Local mode is for
+         * the S25 6.6 family only.
+         */
+        fun profileNeedsShizuku(name: String?): Boolean =
+            name != null && (name.startsWith("S26") || name.startsWith("Z Fold 8") || name.startsWith("F976"))
+    }
+
+    // ---------------------------------------------------------------------
+    // Settings
+    // ---------------------------------------------------------------------
+
+    /** When on, the pipeline stages the latest ksud/.ko fetched from GitHub instead of the bundled ones. */
+    var useLatestKsu: Boolean
+        get() = prefs.getBoolean("use_latest_ksu", false)
+        set(value) = prefs.edit().putBoolean("use_latest_ksu", value).apply()
+
+    // ---- Auto-root on boot (additive only; the pipeline is untouched) ----
+
+    var autoRootOnBoot: Boolean
+        get() = prefs.getBoolean("auto_root_on_boot", false)
+        set(value) = prefs.edit().putBoolean("auto_root_on_boot", value).apply()
+
+    fun lastRunProfile(): String? {
+        val name = prefs.getString("last_run_profile", null) ?: return null
+        return name.takeIf { it.isNotBlank() }
+    }
+
+    fun setLastRunProfile(name: String) = prefs.edit().putString("last_run_profile", name).apply()
+
+    fun autoRootBootCount(): Int = prefs.getInt("auto_root_boot_count", -1)
+
+    fun setAutoRootBootCount(count: Int) = prefs.edit().putInt("auto_root_boot_count", count).apply()
+
+    /** Home-page switch: "kernelsu" (default) or "kernelsu_next". */
+    var ksuFlavor: String
+        get() = prefs.getString("ksu_flavor", "kernelsu") ?: "kernelsu"
+        set(value) = prefs.edit().putString("ksu_flavor", value).apply()
+
+    /** Selected kernel manager option id (see KernelManagerType). */
+    var kernelManagerId: String
+        get() = prefs.getString("kernel_manager_id", KernelManagerType.AUTO.id) ?: KernelManagerType.AUTO.id
+        set(value) = prefs.edit().putString("kernel_manager_id", value).apply()
+
+    /** Custom manager package ID when kernelManagerId == "custom". */
+    var customManagerPackage: String
+        get() = prefs.getString("custom_manager_package", "") ?: ""
+        set(value) = prefs.edit().putString("custom_manager_package", value.trim()).apply()
+
+    /**
+     * New method — profil ksud Next choisi sur l'accueil (id du fichier dans
+     * assets/df/ksud-next/). "" = défaut (profil le plus récent), cf.
+     * KsudNextProfiles.
+     */
+    var ksudNextProfile: String
+        get() = prefs.getString("ksud_next_profile", "") ?: ""
+        set(value) = prefs.edit().putString("ksud_next_profile", value).apply()
+
+    fun latestKsuTag(): String = prefs.getString("latest_ksu_tag", "") ?: ""
+
+    fun setLatestKsuTag(tag: String) = prefs.edit().putString("latest_ksu_tag", tag).apply()
+
+    // ---- Instant root (DFReroot second stage) ----
+
+    /** When on, DFReroot re-roots the phone at every boot (no exploit run). */
+    var instantRootEnabled: Boolean
+        get() = prefs.getBoolean("instant_root_enabled", false)
+        set(value) = prefs.edit().putBoolean("instant_root_enabled", value).apply()
+
+    /** The one-time "enable instant root?" offer after the first success. */
+    var instantRootPrompted: Boolean
+        get() = prefs.getBoolean("instant_root_prompted", false)
+        set(value) = prefs.edit().putBoolean("instant_root_prompted", value).apply()
+
+    /** "" = not running; "injected" = key in packages.xml, helper install pending after the soft reboot. */
+    var instantRootSetupStage: String
+        get() = prefs.getString("instant_root_setup_stage", "") ?: ""
+        set(value) = prefs.edit().putString("instant_root_setup_stage", value).apply()
+
+    fun fileMd5(f: File): String = runCatching {
+        val md = java.security.MessageDigest.getInstance("MD5")
+        f.inputStream().use { input ->
+            val buf = ByteArray(8192)
+            while (true) { val n = input.read(buf); if (n < 0) break; md.update(buf, 0, n) }
+        }
+        md.digest().joinToString("") { "%02x".format(it) }
+    }.getOrDefault("?")
+
+    // ---------------------------------------------------------------------
+    // Profiles
+    // ---------------------------------------------------------------------
+
+    /**
+     * Keeps the staged copies of the bundled default profiles in sync with the
+     * assets: when a new APK ships updated binaries (e.g. a rebuilt ksud), the
+     * staged files are refreshed in place. Existing profiles (incl. user edits)
+     * are preserved — only the binary files are overwritten when they differ.
+     */
+    private fun refreshBundledBinaries() {
+        val extDir = context.getExternalFilesDir(null) ?: return
+        val mapping = mapOf(
+            "s93XX" to listOf("cve.so", "kernelsu.ko", "ksud"),
+            "s25-zzhl" to listOf("cve.so", "kernelsu.ko", "ksud"),
+            "s25-zzi4" to listOf("cve.so", "kernelsu.ko", "ksud"),
+            "s25-zzi4-classic" to listOf("cve-2026-43499", "cve-2026-43499-root"),
+            "s26u-zzhk" to listOf("cve.so", "kernelsu.ko", "ksud"),
+            "s93XX-next" to listOf("cve.so", "kernelsu.ko", "ksud"),
+            "s25-zzhl-next" to listOf("cve.so", "kernelsu.ko", "ksud"),
+            "s25-zzi4-next" to listOf("cve.so", "kernelsu.ko", "ksud"),
+            "s26u-zzhk-next" to listOf("cve.so", "kernelsu.ko", "ksud"),
+            "zfold8" to listOf("cve.so", "kernelsu.ko", "ksud"),
+            "zfold8-next" to listOf("cve.so", "kernelsu.ko", "ksud"),
+        )
+        for ((dir, files) in mapping) {
+            for (name in files) {
+                runCatching {
+                    val asset = "profiles/$dir/$name"
+                    val staged = File(extDir, "$dir/$name")
+                    if (!staged.exists()) return@runCatching
+                    val aMd5 = context.assets.open(asset).use { input ->
+                        val md = java.security.MessageDigest.getInstance("MD5")
+                        val buf = ByteArray(8192)
+                        while (true) { val n = input.read(buf); if (n < 0) break; md.update(buf, 0, n) }
+                        md.digest().joinToString("") { "%02x".format(it) }
+                    }
+                    val sMd5 = fileMd5(staged)
+                    if (aMd5 != sMd5 && aMd5 != "?") {
+                        copyAssetToFile(asset, staged)
+                    }
+                }
+            }
+        }
+    }
+
+    fun initialize() {
+        installCrashHandler()
+        refreshBundledBinaries()
+        loadProfiles()
+        ensureDefaultProfiles()
+        restoreRootedState()
+        recoverInterruptedRuns()
+        lastCrash()?.let { appendLog("[!] Previous run CRASHED (app):"); it.lineSequence().take(12).forEach { appendLog("    $it") } }
+    }
+
+    /** Nothing may die silently: app crashes land in filesDir/last_crash.txt. */
+    private fun installCrashHandler() {
+        if (crashHandlerInstalled) return
+        crashHandlerInstalled = true
+        val previous = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { t, e ->
+            runCatching {
+                File(context.filesDir, "last_crash.txt").writeText(
+                    "thread=${t.name}\n${android.util.Log.getStackTraceString(e)}")
+            }
+            previous?.uncaughtException(t, e)
+            android.os.Process.killProcess(android.os.Process.myPid())
+        }
+    }
+
+    private fun lastCrash(): String? {
+        val f = File(context.filesDir, "last_crash.txt")
+        if (!f.exists()) return null
+        val text = runCatching { f.readText() }.getOrDefault("")
+        runCatching { f.delete() }
+        return text.takeIf { it.isNotBlank() }
+    }
+
+    fun resetProfiles() { prefs.edit().remove("profiles_json").apply(); profiles.clear(); ensureDefaultProfiles() }
+
+    fun profileByName(name: String?): DeviceProfile? = profiles.firstOrNull { it.name == name }
+
+    fun addOrUpdateProfile(profile: DeviceProfile, originalName: String? = null) {
+        val key = originalName ?: profile.name
+        val index = profiles.indexOfFirst { it.name == key }
+        if (index >= 0) profiles[index] = profile else profiles.add(profile)
+        saveProfiles()
+    }
+
+    fun deleteProfile(name: String) {
+        profiles.removeAll { it.name == name }
+        saveProfiles()
+    }
+
+    fun setRunning(r: Boolean) { _running.value = r }
+
+    private fun loadProfiles() {
+        profiles.clear()
+        val json = prefs.getString("profiles_json", null) ?: return
+        runCatching {
+            val arr = JSONArray(json)
+            for (i in 0 until arr.length()) {
+                val o = arr.getJSONObject(i)
+                profiles.add(DeviceProfile(
+                    o.getString("name"), o.optString("kaslrOffset", ""),
+                    o.getString("pathSo"), o.getString("pathKo"), o.getString("pathKsud"),
+                    o.optString("deviceType", "samsung"),
+                    o.optString("pathCveNormal", null), o.optString("pathCveRoot", null),
+                    o.optString("flavor", "kernelsu"), o.optBoolean("useShizuku", false)))
+            }
+        }
+    }
+    fun saveProfiles() {
+        val arr = JSONArray()
+        for (p in profiles) arr.put(JSONObject().apply {
+            put("name", p.name); put("kaslrOffset", p.kaslrOffset); put("pathSo", p.pathSo)
+            put("pathKo", p.pathKo); put("pathKsud", p.pathKsud); put("deviceType", p.deviceType)
+            put("pathCveNormal", p.pathCveNormal); put("pathCveRoot", p.pathCveRoot)
+            put("flavor", p.flavor); put("useShizuku", p.useShizuku)
+        })
+        prefs.edit().putString("profiles_json", arr.toString()).apply()
+    }
+
+    private data class DefaultSpec(
+        val name: String, val flavor: String, val dir: String,
+        val deviceType: String, val classic: Boolean,
+    )
+
+    /**
+     * Bundled profiles (specs). Profiles are created when MISSING only, so a new
+     * APK with extra profiles (e.g. the KernelSU-Next set) augments existing
+     * installs without touching user-created profiles or edits.
+     */
+    private fun defaultSpecs() = listOf(
+        DefaultSpec("S93XX (Samsung S25)", "kernelsu", "s93XX", "samsung", false),
+        DefaultSpec("Oppo X9", "kernelsu", "oppo", "oppo", false),
+        DefaultSpec("S25 6.6.127 ZZHL", "kernelsu", "s25-zzhl", "samsung", false),
+        DefaultSpec("S25 6.6.127 ZZI4", "kernelsu", "s25-zzi4", "samsung", true),
+        DefaultSpec("S26 Ultra 6.12.69 ZZHK", "kernelsu", "s26u-zzhk", "oppo", false),
+        DefaultSpec("S93XX (Samsung S25) Next", "kernelsu_next", "s93XX-next", "samsung", false),
+        DefaultSpec("S25 6.6.127 ZZHL Next", "kernelsu_next", "s25-zzhl-next", "samsung", false),
+        DefaultSpec("S25 6.6.127 ZZI4 Next", "kernelsu_next", "s25-zzi4-next", "samsung", true),
+        DefaultSpec("S26 Ultra 6.12.69 ZZHK Next", "kernelsu_next", "s26u-zzhk-next", "oppo", false),
+        DefaultSpec("F976X 6.12.58", "kernelsu", "zfold8", "samsung", false),
+        DefaultSpec("F976X 6.12.58 Next", "kernelsu_next", "zfold8-next", "samsung", false),
+    )
+
+    private fun ensureDefaultProfiles() {
+        val extDir = context.getExternalFilesDir(null) ?: return
+        var changed = false
+        for (spec in defaultSpecs()) {
+            if (profiles.any { it.name == spec.name }) continue
+            val dir = File(extDir, spec.dir).apply { mkdirs() }
+            val so = copyAssetToFile("profiles/${spec.dir}/cve.so", File(dir, "cve.so")) ?: continue
+            val ko = copyAssetFromFile("profiles/${spec.dir}/kernelsu.ko", File(dir, "kernelsu.ko")) ?: continue
+            val ksud = copyAssetFromFile("profiles/${spec.dir}/ksud", File(dir, "ksud")) ?: continue
+            var cn: File? = null
+            var cr: File? = null
+            if (spec.classic) {
+                cn = copyAssetFromFile("profiles/s25-zzi4-classic/cve-2026-43499", File(dir, "cve-classic"))
+                cr = copyAssetFromFile("profiles/s25-zzi4-classic/cve-2026-43499-root", File(dir, "cve-root"))
+            }
+            profiles.add(DeviceProfile(
+                spec.name, "", so.absolutePath, ko.absolutePath, ksud.absolutePath,
+                spec.deviceType, cn?.absolutePath, cr?.absolutePath, spec.flavor))
+            changed = true
+        }
+        if (changed) saveProfiles()
+    }
+
+    private fun copyAssetFromFile(assetPath: String, destFile: File): File? =
+        copyAssetToFile(assetPath, destFile)
+
+    fun copyAssetToFile(assetPath: String, destFile: File): File? {
+        return try {
+            context.assets.open(assetPath).use { i -> FileOutputStream(destFile).use { o -> i.copyTo(o) } }
+            destFile.setReadable(true, false); destFile.setExecutable(true, false); destFile
+        } catch (e: Exception) { null }
+    }
+
+    // ---------------------------------------------------------------------
+    // Rooted state (live: this boot only — an LKM late-load root does NOT
+    // survive a reboot, so the persisted flag is never trusted for display)
+    // ---------------------------------------------------------------------
+
+    private fun restoreRootedState() {
+        _rooted.value = rootAlive()
+    }
+
+    fun refreshRootedLive() {
+        _rooted.value = rootAlive()
+    }
+
+    /**
+     * Live root state for the current kernel boot:
+     * 1. A working `su -c id` (uid=0) always counts as rooted (and stamps the
+     *    current kernel boot_id).
+     * 2. A recorded successful root for this exact `/proc/sys/kernel/random/boot_id`
+     *    persists across zygote / surfaceflinger soft reboots even when UniRoot
+     *    itself has not been granted su, and resets automatically on a real reboot.
+     */
+    fun rootAlive(): Boolean {
+        val suOk = runCatching {
+            val p = ProcessBuilder("su", "-c", "id").start()
+            val done = p.waitFor(4, java.util.concurrent.TimeUnit.SECONDS)
+            if (!done) { runCatching { p.destroy() }; false }
+            else p.inputStream.bufferedReader().use { it.readText() }.contains("uid=0")
+        }.getOrDefault(false)
+        if (suOk) {
+            BootRootState.markRooted(context, loadedKsuFlavor())
+            return true
+        }
+        return BootRootState.isRootedThisBoot(context)
+    }
+
+    fun markRooted(profileName: String, explicitFlavor: String? = null) {
+        val set = prefs.getStringSet("rooted_profiles", emptySet()).orEmpty().toMutableSet()
+        set.add(profileName)
+        val flavor = explicitFlavor ?: profileByName(profileName)?.flavor
+        prefs.edit().apply {
+            putStringSet("rooted_profiles", set)
+            if (!flavor.isNullOrBlank()) putString("loaded_flavor", flavor)
+        }.commit()
+        BootRootState.markRooted(context, flavor)
+        _rooted.value = true
+    }
+
+    /** Flavor of the KernelSU module currently loaded (recorded at root time) — used by auto-root. */
+    fun loadedKsuFlavor(): String? =
+        BootRootState.rootedFlavorThisBoot(context) ?: prefs.getString("loaded_flavor", null)
+
+    fun clearRootedFlag() {
+        prefs.edit().remove("rooted_profiles").commit()
+        BootRootState.clear(context)
+        _rooted.value = false
+    }
+
+    /**
+     * Live KernelSU module check (classic AND Next). Two lookup paths because
+     * the app SELinux domain can be denied /proc/modules on some devices:
+     * direct read first, then a shell read. Matches "kernelsu*"/"ksunext*"
+     * module names so both flavors are detected.
+     */
+    fun ksuModuleLoaded(): Boolean {
+        runCatching { File("/proc/modules").readText() }.getOrNull()?.let { text ->
+            if (moduleLinePresent(text)) return true
+        }
+        val viaShell = runCatching {
+            val p = ProcessBuilder("sh", "-c", "cat /proc/modules").redirectErrorStream(true).start()
+            val done = p.waitFor(5, java.util.concurrent.TimeUnit.SECONDS)
+            val text = if (done) p.inputStream.bufferedReader().use { it.readText() } else ""
+            runCatching { p.destroy() }
+            text
+        }.getOrDefault("")
+        return moduleLinePresent(viaShell)
+    }
+
+    private fun moduleLinePresent(procModules: String): Boolean =
+        procModules.contains("kernelsu") || procModules.contains("ksunext")
+
+    // ---------------------------------------------------------------------
+    // Run logs (Root My Galaxy style boxes, shareable .txt)
+    // ---------------------------------------------------------------------
+
+    // ------------------------------------------------------------------
+    // Run logs: RMG-style persistence. The box exists from the START of the
+    // run ("Running") and every log line is appended live, so a crash or an
+    // unexpected reboot still leaves a complete Failed box behind.
+    // ------------------------------------------------------------------
+
+    private var activeRunStamp: String? = null
+    private var activeRunProfile: String = ""
+
+    private val runLogsDir: File get() = File(context.filesDir, "run-logs").apply { mkdirs() }
+
+    private fun stampNow(): String =
+        java.text.SimpleDateFormat("yyyy-MM-dd_HH-mm-ss", java.util.Locale.US).format(java.util.Date())
+
+    private fun runLogFile(stamp: String, status: String): File =
+        File(runLogsDir, "${stamp}_${status.replace(Regex("[^A-Za-z]"), "-")}.txt")
+
+    private fun runLogHeader(stamp: String, status: String, profileName: String, durationMs: Long): String = buildString {
+        val info = detectDevice()
+        appendLine("UniRoot run log")
+        appendLine("Date:     ${stamp.replace('_', ' ')}")
+        appendLine("Result:   $status")
+        appendLine("Duration: ${durationMs / 1000}s")
+        appendLine("Profile:  $profileName")
+        appendLine("Device:   ${info.model}")
+        appendLine("Kernel:   ${info.kernel}")
+        appendLine("==========================================")
+    }
+
+    fun beginRunLog(profileName: String) {
+        val stamp = stampNow()
+        activeRunStamp = stamp
+        activeRunProfile = profileName
+        runCatching { runLogFile(stamp, "Running").writeText(runLogHeader(stamp, "Running", profileName, 0)) }
+    }
+
+    private fun appendToActiveRunLog(lines: List<String>) {
+        val stamp = activeRunStamp ?: return
+        runCatching { runLogFile(stamp, "Running").appendText(lines.joinToString("\n", postfix = "\n")) }
+    }
+
+    fun endRunLog(status: String, profileName: String, durationMs: Long) {
+        val stamp = activeRunStamp
+        activeRunStamp = null
+        runCatching {
+            stamp?.let { runLogFile(it, "Running").delete() }
+            val finalStamp = stamp ?: stampNow()
+            runLogFile(finalStamp, status).writeText(
+                runLogHeader(finalStamp, status, profileName, durationMs) + _logLines.value.joinToString("\n") + "\n")
+            // keep the 30 most recent boxes only
+            runLogsDir.listFiles { f -> f.extension == "txt" }?.sortedByDescending { it.name }?.drop(30)?.forEach { it.delete() }
+        }
+    }
+
+    /** Fallback for exceptions thrown outside the pipeline: no duplicate box. */
+    fun abandonActiveRunLog() {
+        val stamp = activeRunStamp ?: return
+        activeRunStamp = null
+        endRunLog("Failed", activeRunProfile, 0)
+        runCatching { runLogFile(stamp, "Running").delete() }
+    }
+
+    /** Root My Galaxy closeInterruptedRuns: a box left "Running" means a crash/reboot. */
+    fun recoverInterruptedRuns() {
+        runCatching {
+            runLogsDir.listFiles { f -> f.name.endsWith("_Running.txt") }?.forEach { f ->
+                val stamp = f.name.substringBeforeLast('_')
+                val content = f.readText().replaceFirst("Result:   Running", "Result:   Failed (interrupted)")
+                if (f.delete()) File(runLogsDir, "${stamp}_Failed-Interrupted.txt").writeText(content)
+            }
+        }
+    }
+
+    fun listRunLogs(): List<RunLogFile> = runCatching {
+        val dir = File(context.filesDir, "run-logs")
+        val fmt = java.text.SimpleDateFormat("yyyy-MM-dd_HH-mm-ss", java.util.Locale.US)
+        dir.listFiles { f -> f.extension == "txt" }.orEmpty()
+            .sortedByDescending { it.name }
+            .mapNotNull { f ->
+                val stamp = f.name.substringBeforeLast('_')
+                val status = f.name.substringAfterLast('_').removeSuffix(".txt")
+                val time = runCatching { fmt.parse(stamp)?.time }.getOrNull() ?: f.lastModified()
+                RunLogFile(f, time, status)
+            }
+    }.getOrDefault(emptyList())
+
+    fun deleteRunLog(file: File) { runCatching { file.delete() } }
+
+    // ---------------------------------------------------------------------
+    // Root My Galaxy remote support
+    // ---------------------------------------------------------------------
+
+    /**
+     * Talks to the Root My Galaxy GitHub (support feed), matches this device and,
+     * on a hit, downloads the official payloads and registers them as a profile.
+     * Returns a user-facing status line.
+     */
+    suspend fun checkRootMyGalaxy(): String = withContext(Dispatchers.IO) {
+        try {
+            val info = detectDevice()
+            val targets = gitHub.fetchRmgTargets()
+            val kernelVersion = gitHub.kernelThreePart(info.kernel)
+            val target = gitHub.matchRmgTarget(targets, info.model, kernelVersion)
+            if (target == null) {
+                "Root My Galaxy: no supported payload for ${info.model} / $kernelVersion (${targets.size} targets online)"
+            } else {
+                val existing = profileByName("RMG · ${target.displayName}")
+                val profile = gitHub.downloadRmgProfile(target)
+                addOrUpdateProfile(profile, if (existing != null) profile.name else null)
+                if (existing == null) appendLog("[RootMyGalaxy] New profile from GitHub: ${profile.name}")
+                "Root My Galaxy: matched ${target.displayName} — payload downloaded and ready"
+            }
+        } catch (e: Exception) {
+            "Root My Galaxy: offline (${e.message})"
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // KernelSU / KernelSU Next latest binaries
+    // ---------------------------------------------------------------------
+
+    /**
+     * Fetches the latest ksud + prebuilt .ko for the running kernel KMI from the
+     * selected flavor's GitHub releases, into [profile]'s directory. The files are
+     * only used when the "latest from GitHub" option is enabled.
+     */
+    suspend fun fetchLatestKsuFor(profile: DeviceProfile): String = withContext(Dispatchers.IO) {
+        try {
+            val kmi = gitHub.kmiFromKernel(detectDevice().kernel)
+            require(kmi.isNotEmpty()) { "Cannot read the kernel KMI" }
+            val destDir = File(profile.pathKsud).parentFile ?: context.filesDir
+            val latest = gitHub.fetchLatestKsu(kmi, destDir) { appendLog(it) }
+            setLatestKsuTag(latest.tag)
+            "Downloaded KernelSU ${latest.tag} for $kmi"
+        } catch (e: Exception) {
+            "Download failed: ${e.message}"
+        }
+    }
+
+    fun latestKsuFilesFor(profile: DeviceProfile): Pair<File, File>? {
+        val dir = File(profile.pathKsud).parentFile ?: return null
+        val ksud = File(dir, "ksud-kernelsu-latest")
+        if (!ksud.exists()) return null
+        val ko = File(dir, "kernelsu-kernelsu-latest.ko")
+        return ksud to if (ko.exists()) ko else File(profile.pathKo)
+    }
+
+    // ---------------------------------------------------------------------
+    // KernelSU manager app (external): force-stop + relaunch after a run
+    // ---------------------------------------------------------------------
+
+    fun selectedKernelManager(): KernelManagerType = KernelManagerType.fromId(kernelManagerId)
+
+    fun findKsuManager(next: Boolean = false): KsuManagerMatch? =
+        KsuManagerDetector.find(
+            context = context,
+            managerType = selectedKernelManager(),
+            ksuNextFallback = next,
+            customPackage = customManagerPackage,
+        )
+
+    fun isKsuManagerInstalled(next: Boolean = false): Pair<Boolean, String> {
+        val match = findKsuManager(next)
+        return if (match != null) true to match.packageName else false to ""
+    }
+
+    /** Custom ksud slot read by DFBridge.stageKsud (wins over bundled profiles). */
+    fun customKsudFile(next: Boolean): File =
+        File(context.filesDir.parentFile ?: context.filesDir, if (next) "ksud-custom-next" else "ksud-custom-classic")
+
+    fun customKsudStatus(next: Boolean): String {
+        val f = customKsudFile(next)
+        if (!f.isFile || f.length() <= 100_000L) return ""
+        val mb = f.length() / (1024.0 * 1024.0)
+        return String.format("Custom ksud active (%.2f MB)", mb)
+    }
+
+    fun importCustomKsud(uri: android.net.Uri, next: Boolean): Result<String> = runCatching {
+        val dest = customKsudFile(next)
+        val tmp = File(dest.parentFile, dest.name + ".tmp")
+        val stream = context.contentResolver.openInputStream(uri)
+            ?: error("Could not read selected file")
+        stream.use { input ->
+            FileOutputStream(tmp).use { output -> input.copyTo(output) }
+        }
+        require(tmp.length() > 100_000L) {
+            tmp.delete()
+            "File too small (${tmp.length()} bytes) — select an arm64 ksud binary"
+        }
+        val magic = ByteArray(4)
+        tmp.inputStream().use { it.read(magic) }
+        require(magic[0] == 0x7f.toByte() && magic[1] == 'E'.code.toByte() && magic[2] == 'L'.code.toByte() && magic[3] == 'F'.code.toByte()) {
+            tmp.delete()
+            "Selected file is not an ELF binary (ksud)"
+        }
+        if (dest.exists()) dest.delete()
+        require(tmp.renameTo(dest)) { "Could not save custom ksud" }
+        dest.setReadable(true, false)
+        dest.setExecutable(true, false)
+        customKsudStatus(next)
+    }
+
+    fun clearCustomKsud(next: Boolean): Boolean {
+        val f = customKsudFile(next)
+        val existed = f.isFile
+        runCatching { f.delete() }
+        return existed
+    }
+
+    /** Kills a stale manager so it re-reads the freshly loaded module (shell can force-stop). */
+    suspend fun forceStopKsuManager(pkg: String): Boolean = withContext(Dispatchers.IO) {
+        if (!shizukuBinderActive() || !shizukuPermissionGranted()) return@withContext false
+        runDiagnosticCommand("am force-stop $pkg", true) == 0
+    }
+
+    /** Launches the manager via the Shizuku shell — reliable even from background. */
+    suspend fun startManagerViaShizuku(pkg: String, activity: String): Boolean = withContext(Dispatchers.IO) {
+        if (!shizukuBinderActive() || !shizukuPermissionGranted()) return@withContext false
+        runDiagnosticCommand("am start -n $pkg/$activity", true) == 0
+    }
+
+    // ---------------------------------------------------------------------
+    // Logs
+    // ---------------------------------------------------------------------
+
+    /** Live progress hook (0..100 + label) fed by appendLog markers — used by the auto-root live notification. */
+    var progressListener: ((Int, String) -> Unit)? = null
+    private var lastProgressStage = -1
+    private val progressStages = listOf(
+        20 to "[Pipeline] Start",
+        35 to "p0 pipe oracle prepared",
+        50 to "slide-kaslr-ok",
+        70 to "done=1 root=1",
+        85 to "[Daemon] Preparing ksud",
+        95 to "kernelsu.ko loaded successfully",
+    )
+
+    private fun maybeReportProgress(lines: List<String>) {
+        val listener = progressListener ?: return
+        for ((idx, entry) in progressStages.withIndex()) {
+            val marker = entry.second
+            if (idx > lastProgressStage && lines.any { it.contains(marker) }) {
+                lastProgressStage = idx
+                val label = when (idx) {
+                    0 -> "Starting exploit"
+                    1 -> "Exploit running"
+                    2 -> "KASLR slide found"
+                    3 -> "Kernel access granted"
+                    4 -> "Late-loading KernelSU"
+                    else -> "Finishing KernelSU setup"
+                }
+                listener(20 + idx * 15, label)
+                break
+            }
+        }
+        if (lines.any { it.contains("[Success] Root acquired") }) {
+            lastProgressStage = progressStages.size
+            listener(100, "Root acquired — phone is rooted")
+        }
+    }
+
+    fun resetProgress() { lastProgressStage = -1 }
+
+    fun appendLog(msg: String) {
+        if (msg.isBlank()) return
+        // GhostLock-style: one entry per line so each line carries its own tone.
+        val lines = msg.lineSequence().filter { it.isNotBlank() }.toList()
+        if (lines.isEmpty()) return
+        _logLines.value = _logLines.value + lines
+        runCatching { File(context.filesDir, "current_run.log").appendText(lines.joinToString("\n", postfix = "\n")) }
+        appendToActiveRunLog(lines)
+        maybeReportProgress(lines)
+    }
+
+    fun clearLogs() { _logLines.value = emptyList(); runCatching { File(context.filesDir, "current_run.log").delete() } }
+
+    // ---------------------------------------------------------------------
+    // Device / Shizuku
+    // ---------------------------------------------------------------------
+
+    fun detectDevice(): DeviceInfo {
+        val model = Build.MODEL ?: ""
+        val norm = DeviceInfoPanel.normalizeSamsungModel(model)
+        val incremental = Build.VERSION.INCREMENTAL ?: ""
+        val procVersion = runCatching { File("/proc/version").readText() }.getOrDefault("")
+            .substringAfter("Linux version ", "").substringBefore(" (").trim()
+        val kernel = procVersion.ifEmpty { System.getProperty("os.version") ?: "" }.trim()
+        val matched: String? = when {
+            (norm.startsWith("SM-F971") || norm.startsWith("SM-F976")) && kernel.contains("6.12.58") -> "F976X 6.12.58"
+            norm.startsWith("SM-S948") && kernel.contains("6.12.69") -> "S26 Ultra 6.12.69 ZZHK"
+            norm.startsWith("SM-S931") && kernel.contains("6.6.127") && incremental.contains("ZZI4") -> "S25 6.6.127 ZZI4"
+            norm.startsWith("SM-S931") && kernel.contains("6.6.127") && incremental.contains("ZZHL") -> "S25 6.6.127 ZZHL"
+            norm.startsWith("SM-S93") -> "S93XX (Samsung S25)"
+            else -> null
+        }
+        val socModel = runCatching { Build.SOC_MODEL }.getOrNull().orEmpty()
+        val soc = resolveSocName(norm, socModel)
+        return DeviceInfo(model, kernel.ifEmpty { incremental }, soc, matched)
+    }
+
+    internal fun resolveSocName(normModel: String, socModel: String): String = when {
+        normModel.startsWith("SM-S94") || normModel.startsWith("SM-F97") ||
+            socModel.equals("SM8850", ignoreCase = true) -> "Snapdragon 8 Elite Gen 5"
+        normModel.startsWith("SM-S93") || normModel.startsWith("SM-F966") ||
+            socModel.equals("SM8750", ignoreCase = true) -> "Snapdragon 8 Elite"
+        socModel.contains("2500") || socModel.equals("S5E9955", ignoreCase = true) ||
+            normModel.startsWith("SM-F766") -> "Exynos 2500"
+        normModel.startsWith("SM-S721") || normModel.startsWith("SM-S731") ||
+            normModel.startsWith("SM-F761") -> "Exynos 2400e"
+        socModel.contains("2400") || socModel.equals("S5E9945", ignoreCase = true) -> "Exynos 2400"
+        normModel.startsWith("SM-S92") || normModel.startsWith("SM-F956") || normModel.startsWith("SM-F741") ||
+            socModel.equals("SM8650", ignoreCase = true) -> "Snapdragon 8 Gen 3"
+        normModel.startsWith("SM-S91") || normModel.startsWith("SM-F946") || normModel.startsWith("SM-F731") ||
+            normModel.startsWith("SM-X71") || normModel.startsWith("SM-X81") || normModel.startsWith("SM-X91") ||
+            socModel.equals("SM8550", ignoreCase = true) -> "Snapdragon 8 Gen 2"
+        normModel.startsWith("SM-F936") || normModel.startsWith("SM-F721") ||
+            socModel.equals("SM8475", ignoreCase = true) -> "Snapdragon 8+ Gen 1"
+        socModel.contains("2200") || socModel.equals("S5E9925", ignoreCase = true) ||
+            normModel.startsWith("SM-S711") -> "Exynos 2200"
+        normModel.startsWith("SM-S90") || socModel.equals("SM8450", ignoreCase = true) -> "Snapdragon 8 Gen 1"
+        socModel.contains("2100") || socModel.equals("S5E9840", ignoreCase = true) -> "Exynos 2100"
+        normModel.startsWith("SM-G99") || normModel.startsWith("SM-F926") || normModel.startsWith("SM-F711") ||
+            socModel.equals("SM8350", ignoreCase = true) -> "Snapdragon 888"
+        socModel.contains("990") || socModel.equals("Exynos990", ignoreCase = true) -> "Exynos 990"
+        normModel.startsWith("SM-N98") || normModel.startsWith("SM-F916") || normModel.startsWith("SM-F707") ||
+            socModel.equals("SM8250", ignoreCase = true) && !normModel.startsWith("SM-G98") && !normModel.startsWith("SM-G78") -> "Snapdragon 865+"
+        normModel.startsWith("SM-G98") || normModel.startsWith("SM-G78") ||
+            socModel.equals("SM8250", ignoreCase = true) -> "Snapdragon 865"
+        socModel.contains("9825") -> "Exynos 9825"
+        socModel.contains("9820") -> "Exynos 9820"
+        normModel.startsWith("SM-G97") || normModel.startsWith("SM-N97") ||
+            normModel.startsWith("SM-F90") || normModel.startsWith("SM-F700") ||
+            socModel.equals("SM8150", ignoreCase = true) -> "Snapdragon 855"
+        // MediaTek platforms (Tab S10, Tab A11+, A15, A16, A34, A07, Tab A9/A11)
+        normModel.startsWith("SM-X82") || normModel.startsWith("SM-X92") ||
+            socModel.contains("MT6989", ignoreCase = true) -> "MediaTek Dimensity 9300+"
+        normModel.startsWith("SM-X23") || socModel.contains("MT6878", ignoreCase = true) -> "MediaTek Dimensity 7300"
+        normModel.startsWith("SM-A346") || socModel.contains("MT6877", ignoreCase = true) -> "MediaTek Dimensity 1080"
+        socModel.contains("MT6835T", ignoreCase = true) || socModel.contains("6300") ||
+            normModel.startsWith("SM-A066") || normModel.startsWith("SM-A076") -> "MediaTek Dimensity 6300"
+        normModel.startsWith("SM-A156") || socModel.contains("MT6835", ignoreCase = true) -> "MediaTek Dimensity 6100+"
+        DeviceInfoPanel.isMt6789Platform(normModel, socModel) -> "MediaTek Helio G99 (MT6789)"
+        // Mid-range Snapdragon & Exynos (A-series & Tab A9+ / Tab S9 FE)
+        normModel.startsWith("SM-A566") || socModel.equals("S5E8855", ignoreCase = true) ||
+            socModel.contains("1580") -> "Exynos 1580"
+        normModel.startsWith("SM-A556") || normModel.startsWith("SM-E736") ||
+            socModel.equals("S5E8845", ignoreCase = true) || socModel.contains("1480") -> "Exynos 1480"
+        normModel.startsWith("SM-A366") || socModel.equals("SM6475", ignoreCase = true) -> "Snapdragon 6 Gen 3"
+        normModel.startsWith("SM-A356") || normModel.startsWith("SM-A546") || normModel.startsWith("SM-A266") ||
+            normModel.startsWith("SM-M356") || normModel.startsWith("SM-X51") || normModel.startsWith("SM-X61") ||
+            socModel.equals("S5E8835", ignoreCase = true) || socModel.contains("1380") -> "Exynos 1380"
+        normModel.startsWith("SM-A166") || normModel.startsWith("SM-A146") ||
+            socModel.equals("S5E8535", ignoreCase = true) || socModel.contains("1330") -> "Exynos 1330"
+        normModel.startsWith("SM-A536") || normModel.startsWith("SM-A336") || normModel.startsWith("SM-A256") ||
+            socModel.equals("S5E8825", ignoreCase = true) || socModel.contains("1280") -> "Exynos 1280"
+        normModel.startsWith("SM-A528") || socModel.equals("SM7325", ignoreCase = true) -> "Snapdragon 778G"
+        normModel.startsWith("SM-X21") || socModel.equals("SM6375", ignoreCase = true) -> "Snapdragon 695"
+        socModel.isNotBlank() -> socModel
+        else -> "-"
+    }
+
+    fun shizukuBinderActive(): Boolean = runCatching { Shizuku.pingBinder() }.getOrDefault(false)
+    fun shizukuPermissionGranted(): Boolean = runCatching {
+        Shizuku.checkSelfPermission() == android.content.pm.PackageManager.PERMISSION_GRANTED
+    }.getOrDefault(false)
+    fun requestShizukuPermission() { runCatching { Shizuku.requestPermission(0) } }
+
+    // Watchdog réel : withTimeoutOrNull n'interrompt PAS un readLine()/waitFor()
+    // bloqué sur un thread — toute commande Shizuku doit avoir un timeout qui
+    // détruit le processus et rend la main, sinon le pipeline gèle en silence.
+    suspend fun runDiagnosticCommand(cmd: String, useShizuku: Boolean): Int = withContext(Dispatchers.IO) {
+        try {
+            val p = newShellProcess(cmd, useShizuku)
+            val ok = p.waitFor(20, java.util.concurrent.TimeUnit.SECONDS)
+            if (!ok) { appendLog("[!] Command timed out: ${cmd.take(80)}"); p.destroyForcibly(); -2 } else 0
+        } catch (e: Exception) { appendLog("[!] Command failed: ${e.javaClass.simpleName} ${cmd.take(60)}"); -1 }
+    }
+
+    suspend fun executeCommandAndReturnOutput(cmd: String, useShizuku: Boolean): String = withContext(Dispatchers.IO) {
+        try {
+            val p = newShellProcess(cmd, useShizuku)
+            val sb = StringBuilder()
+            val reader = Thread {
+                runCatching {
+                    BufferedReader(InputStreamReader(p.inputStream)).use { r ->
+                        var l: String?
+                        while (r.readLine().also { l = it } != null) {
+                            synchronized(sb) { sb.append(l).append('\n') }
+                        }
+                    }
+                }
+            }.apply { isDaemon = true; start() }
+            val finished = p.waitFor(20, java.util.concurrent.TimeUnit.SECONDS)
+            if (!finished) { appendLog("[!] Output command timed out: ${cmd.take(80)}"); p.destroyForcibly() }
+            reader.join(2_000)
+            synchronized(sb) { sb.toString() }
+        } catch (e: Exception) { appendLog("[!] Output command failed: ${e.javaClass.simpleName}"); "" }
+    }
+
+    private fun newShellProcess(cmd: String, useShizuku: Boolean): Process {
+        if (!useShizuku) {
+            return ProcessBuilder("sh", "-c", cmd).redirectErrorStream(true).start()
+        }
+        // The public Shizuku API has NO Shizuku.newProcess — the process service is
+        // only exposed through the IShizukuService AIDL (dev.rikka.shizuku:aidl).
+        // The old reflection silently threw IllegalArgumentException, which is why
+        // the S26 never ran through Shizuku.
+        val binder = Shizuku.getBinder()
+            ?: throw IllegalStateException("Shizuku binder is null (server not running?)")
+        val service = moe.shizuku.server.IShizukuService.Stub.asInterface(binder)
+        val remote = service.newProcess(arrayOf("sh", "-c", cmd), null, null)
+        return ShizukuProcessAdapter(remote)
+    }
+
+
+    suspend fun runExecutionPipeline(rawProfile: DeviceProfile, useShizukuParam: Boolean): String {
+        appendLog("==========================================")
+        appendLog("[Pipeline] Start for \"${rawProfile.name}\"")
+        val runStartedAt = System.currentTimeMillis()
+        beginRunLog(rawProfile.name)
+
+        var profile = rawProfile
+
+        // Un module KernelSU déjà chargé (root classic réussi plus tôt dans ce
+        // boot) laisse ses hooks syscall actifs : ils faussent la course
+        // pselect/futex du payload, qui rate alors sa fenêtre d'écriture.
+        // Tester un profil Next exige un boot vierge.
+        if (ksuModuleLoaded()) {
+            appendLog("[!] Module KernelSU déjà chargé sur ce boot (root déjà actif).")
+            appendLog("[!] Ses hooks syscall faussent la course du payload.")
+            appendLog("[!] Pour tester proprement ce profil : REBOOTE d'abord, puis relance.")
+        }
+
+        // Shizuku famille S26/Z Fold 8 (ou toggle par profil) : le payload
+        // tourne via le shell UID 2000. Les profils Samsung S25 sans fichiers
+        // avancés restent en mode Local VALIDÉ (helper --run-payload + oracle
+        // physique) : le toggle Shizuku est ignoré pour eux.
+        val shizukuProfile = profileNeedsShizuku(profile.name)
+        var useShizuku = useShizukuParam || profile.useShizuku
+        if (shizukuProfile) useShizuku = true
+        if (useShizuku && !shizukuProfile && profile.deviceType == "samsung" && profile.pathCveNormal.isNullOrEmpty()) {
+            appendLog("[Mode] Mode Local validé pour ce profil (Shizuku ignoré)")
+            useShizuku = false
+        }
+
+        // Option "latest from GitHub" : remplacer ksud/.ko embarqués par les
+        // dernières versions officielles KernelSU (déconseillé). Sans elle, on
+        // utilise les fichiers du profil — testés et prévus pour KernelSU.
+        if (useLatestKsu && profile.pathKsud.isNotEmpty()) {
+            var files = latestKsuFilesFor(profile)
+            if (files == null) {
+                appendLog("[KernelSU] Downloading latest KernelSU binaries from GitHub...")
+                val res = fetchLatestKsuFor(profile)
+                appendLog("[KernelSU] $res")
+                files = latestKsuFilesFor(profile)
+            }
+            if (files != null) {
+                appendLog("[KernelSU] Using latest KernelSU binaries (${latestKsuTag()}): ${files.first.name} + ${files.second.name}")
+                profile = profile.copy(pathKsud = files.first.absolutePath, pathKo = files.second.absolutePath)
+            } else {
+                appendLog("[!] Latest binaries unavailable — falling back to the bundled profile files.")
+            }
+        }
+
+        // IMPORTANT : plus de cache KASLR automatique. Le slide change à CHAQUE boot :
+        // réutiliser un offset périmé après un crash/redémarrage = écritures noyau
+        // dans le vide = panic en boucle. Seul un offset saisi manuellement est utilisé.
+        prefs.edit().remove("kaslr_cache_" + profile.name).apply()
+        val kaslr = profile.kaslrOffset
+        if (kaslr.isNotEmpty()) appendLog("[KASLR] Forced Offset : $kaslr (manuel)")
+
+        var process: Process? = null
+        var success = false
+        var finalStatus = "Crash"
+        
+        try {
+            if (useShizuku) {
+                // --- MODE SHIZUKU (Utilisation d'un fichier de log pour ne pas casser l'exploit) ---
+                appendLog("[Shizuku] Sanity check (id)…")
+                val sanity = executeCommandAndReturnOutput("id; echo rc=\$?", true)
+                appendLog("[Shizuku] ${sanity.ifBlank { "NO OUTPUT — Shizuku command channel is broken" }}")
+                val logFilePath = "/data/local/tmp/exploit.log"
+                runDiagnosticCommand("kill -9 \$(cat /data/local/tmp/exploit.pid) 2>/dev/null; rm -f $logFilePath /data/local/tmp/exploit.pid", true)
+                val probeLocal = File(context.getExternalFilesDir(null), "pipeprobe")
+                try { context.assets.open("profiles/s26u-zzhk/pipeprobe").use { i -> FileOutputStream(probeLocal).use { o -> i.copyTo(o) } } } catch (_: Exception) {}
+                if (probeLocal.exists()) {
+                    appendLog("[Probe] Staging pipeprobe…")
+                    val cpProbe = runDiagnosticCommand("cp ${probeLocal.absolutePath} /data/local/tmp/pipeprobe && chmod 755 /data/local/tmp/pipeprobe", true)
+                    if (cpProbe != 0) appendLog("[Probe] Could not stage pipeprobe (rc=$cpProbe) — continuing")
+                    val probeOut = executeCommandAndReturnOutput("/data/local/tmp/pipeprobe 2>&1; echo; id; grep -E ^Seccomp|^NoNewPrivs /proc/self/status", true)
+                    appendLog("[Probe] ${probeOut.ifBlank { "no output" }}")
+                }
+
+                var launchCmd = ""
+                // Le payload v10 du S26 est probabiliste : l'hôte peut mourir en
+                // pleine course (SIGSEGV userspace) sans que le kernel plante.
+                // Sur PC on relance la commande à la main — l'app fait pareil.
+                // Data from run boxes: attempt 1 always fails by design, attempt 2+
+                // finds the slide, and the probabilistic physrw establishment is
+                // ~50/50 per RUN. After a failed run the state clears in ~1 min
+                // (proven: Failed at 00:28 -> Success at 00:29 same boot), so the
+                // app chains full payload relaunches instead of asking the user
+                // to manually re-run — and stops if the pipe budget runs out.
+                // S26 / Z Fold 8 (same h8q 6.12 payload family): more retries —
+                // the pipe race is probabilistic and the app chains whole runs.
+                val maxRelaunches = if (shizukuProfile) 4 else 2
+                var relaunches = 0
+                if (profile.deviceType == "samsung" && !profile.pathCveNormal.isNullOrEmpty() && !profile.pathCveRoot.isNullOrEmpty()) {
+                    appendLog("[Shizuku] Copying advanced CVEs to /data/local/tmp/...")
+                    val cveNormalPath = "/data/local/tmp/cve-2026-43499"
+                    val cveRootPath = "/data/local/tmp/cve-2026-43499-root"
+                    
+                    runDiagnosticCommand("cp ${profile.pathCveNormal} $cveNormalPath && cp ${profile.pathCveRoot} $cveRootPath && chmod 755 $cveNormalPath $cveRootPath", true)
+                    runDiagnosticCommand("cp ${profile.pathKsud} /data/local/tmp/ksud && cp ${profile.pathKo} /data/local/tmp/kernelsu.ko && chmod 755 /data/local/tmp/ksud", true)
+                    
+                    appendLog("[Exploit] Launching via LD_PRELOAD (Shell UID 2000)...")
+                    launchCmd = "LD_PRELOAD=$cveNormalPath /system/bin/true > $logFilePath 2>&1 &"
+                } else {
+                    appendLog("[Shizuku] Copying to /data/local/tmp/...")
+                    val ksudForRun = profile.pathKsud
+                    val isNext = profile.flavor == "kernelsu_next"
+                    if (isNext) {
+                        appendLog("[KernelSU] Next ksud is all-in-one (embedded module) — no external .ko staged.")
+                        if (profile.name.startsWith("S25") || profile.name.startsWith("S93")) {
+                            appendLog("[KernelSU] S25 Next: custom KDP build (no-patch-text + kprobe fallback).")
+                            appendLog("[KernelSU] Its embedded android15-6.6 module is the fixed Next build:")
+                            appendLog("[KernelSU] dispatcher failure now fails closed — Samsung fallback hooks engage.")
+                        }
+                    }
+                    val koStage = if (isNext) "" else "cp ${profile.pathKo} /data/local/tmp/kernelsu.ko && "
+                    val stageRc = runDiagnosticCommand("cp ${profile.pathSo} /data/local/tmp/cve.so && cp /data/local/tmp/cve.so /data/local/tmp/preload.so && $koStage" +
+                        "cp $ksudForRun /data/local/tmp/ksud && chmod 755 /data/local/tmp/cve.so /data/local/tmp/preload.so /data/local/tmp/ksud", true)
+                    val staged = executeCommandAndReturnOutput("ls -la /data/local/tmp/cve.so /data/local/tmp/preload.so /data/local/tmp/ksud 2>&1; md5sum /data/local/tmp/ksud 2>/dev/null", true)
+                    appendLog("[Shizuku] Stage rc=$stageRc; files:\n${staged.ifBlank { "NOT VISIBLE — copy failed?" }}")
+
+                    // Le build APP du payload exige CVE43499_ROOT_HELPER (chemin absolu
+                    // du helper exécuté en root via umh) — cf. root.c:140. Sans lui :
+                    // échec propre "root umh missing CVE43499_ROOT_HELPER".
+                    val helperCmd = if (!profile.pathCveRoot.isNullOrEmpty()) {
+                        runDiagnosticCommand("cp ${profile.pathCveRoot} /data/local/tmp/cve-2026-43499-root && chmod 755 /data/local/tmp/cve-2026-43499-root", true)
+                        "CVE43499_ROOT_HELPER=/data/local/tmp/cve-2026-43499-root "
+                    } else ""
+
+                    appendLog("[Pre-check] Pipe limits and leftover cleanup...")
+                    val pipeInfo = executeCommandAndReturnOutput("echo pipe-max-size=\$(cat /proc/sys/fs/pipe-max-size); echo pipe-soft=\$(cat /proc/sys/fs/pipe-user-pages-soft); echo pipe-hard=\$(cat /proc/sys/fs/pipe-user-pages-hard); echo id=\$(id); echo fcntl-test:\$(LD_PRELOAD= /system/bin/sh -c 'exec 3<>/dev/null; echo test')", true)
+                    if (pipeInfo.isNotBlank()) appendLog("[Pre-check] $pipeInfo")
+                    runDiagnosticCommand("pkill -f '/data/local/tmp/cve.so' 2>/dev/null; pkill -f '/data/local/tmp/preload.so' 2>/dev/null; sleep 1; true", true)
+
+                    appendLog("[Exploit] Launching via LD_PRELOAD (Shell UID 2000)...")
+                    val envVars = "EXPLOIT_ATTEMPTS=24 P0_ATTEMPT_TIMEOUT_SEC=20 $helperCmd"
+                    val kaslrEnv = if (kaslr.isNotEmpty()) "SLIDE_P0_OFFSET=$kaslr" else ""
+                    // S26 (preload v10): the validated chain runs inside a live `sh`
+                    // (LD_PRELOAD=... sh) — the payload re-execs ROOT_STAGE on sh and its
+                    // pipe race needs a host that stays alive. Other profiles keep /system/bin/true.
+                    val isS26 = shizukuProfile
+                    val host = if (isS26) "sh -c 'sleep 300'" else "/system/bin/true"
+                    val cmdString = listOf(envVars.trim(), kaslrEnv, "LD_PRELOAD=/data/local/tmp/cve.so", host, "> $logFilePath 2>&1 & echo \$! > /data/local/tmp/exploit.pid")
+                        .filter { it.isNotBlank() }.joinToString(" ")
+                    appendLog("[CMD] $cmdString")
+                    launchCmd = cmdString
+                }
+
+                appendLog("[Logs] Real-time monitoring (Timeout: 15 min)...")
+                var lastLog = ""
+                var attempts = 0
+
+                var finalLog = ""
+                var hostPid = ""
+                var pidReadTries = 0
+                var epermSeen = false
+                while (true) {
+                val rc = runDiagnosticCommand(launchCmd, true)
+                appendLog("[Exploit] Launch rc=$rc")
+                while (attempts < 3600) {
+                    attempts++; delay(250)
+                    val currentLog = executeCommandAndReturnOutput("cat $logFilePath 2>/dev/null", true)
+                    if (currentLog.length > lastLog.length) { appendLog(currentLog.substring(lastLog.length).trim()); lastLog = currentLog }
+                    
+                    // Succès UNIQUEMENT sur les deux marqueurs exacts du supervisor
+                    // (un simple "complete" mid-log comme "wake=1 complete=1" ne compte pas)
+                    if (currentLog.contains("done=1 root=1") && currentLog.contains("exploit completed attempt=")) { success = true; break }
+                    if (currentLog.contains("pipe overwrite succeeded")) { success = true; break }
+                    // preload v10 (S26): marqueurs de la chaîne validée PC
+                    if (currentLog.contains("Am I root? uid=0")) { success = true; break }
+                    if (currentLog.contains("ksud result=0")) { success = true; break }
+                    if (currentLog.contains("F_SETPIPE_SZ") && currentLog.contains("Operation not permitted") && !epermSeen) {
+                        epermSeen = true
+                        appendLog("[!] F_SETPIPE_SZ EPERM seen (pipe page pressure) — payload retries internally.")
+                    }
+                    // The payload itself refuses to continue when the boot state is
+                    // contaminated (leftover oracle/slab state from previous runs).
+                    // Hammering more attempts on a dirty boot only burns the pipe
+                    // budget: stop immediately and ask for a reboot.
+                    if (currentLog.contains("oracle state dirty")) {
+                        appendLog("[!] Payload reports DIRTY ORACLE STATE — this boot is contaminated.")
+                        appendLog("[!] REBOOT the phone, then run ONCE. Retrying now is useless.")
+                        finalStatus = "Reboot required"
+                        break
+                    }
+                    // Procédure validée (SAVE S26U) : UN run par boot. Si le payload
+                    // a déjà raté 8 tentatives internes sur CE boot, relancer ne sert
+                    // à rien (l'état slab/pipe est contaminé) : on stoppe net.
+                    val internalFail = Regex("pipe flag phase: attempt (\\d+) failed").findAll(currentLog)
+                        .maxOfOrNull { it.groupValues[1].toIntOrNull() ?: 0 } ?: 0
+                    if (internalFail >= 8 && !success) {
+                        appendLog("[!] $internalFail internal attempts failed on this boot — stopping (validated procedure: ONE run per boot).")
+                        appendLog("[!] REBOOT the phone, then run ONCE.")
+                        finalStatus = "Reboot required"
+                        break
+                    }
+                    if (currentLog.contains("failed") || currentLog.contains("[-] exploit")) { finalStatus = "Failed" }
+                    
+                    if (shizukuProfile) {
+                        // The 6.12 preloads hijack the host process; track the real
+                        // host pid instead of guessing process names.
+                        if (hostPid.isEmpty() && pidReadTries < 40) {
+                            pidReadTries++
+                            hostPid = executeCommandAndReturnOutput("cat /data/local/tmp/exploit.pid 2>/dev/null", true).trim()
+                        }
+                        if (attempts > 12 && hostPid.isNotEmpty()) {
+                            val alive = executeCommandAndReturnOutput("test -d /proc/$hostPid && echo a", true).trim().isNotEmpty()
+                            if (!alive && !success) { appendLog("[!] Host process (pid $hostPid) died."); break }
+                        }
+                    } else {
+                        val isAlive = executeCommandAndReturnOutput("pidof true 2>/dev/null", true).trim().isNotEmpty()
+                        if (attempts > 12 && !isAlive && !success) { appendLog("[!] Process terminated early."); break }
+                    }
+                }
+
+                finalLog = executeCommandAndReturnOutput("cat $logFilePath 2>/dev/null", true)
+                if (finalLog.length > lastLog.length) { appendLog(finalLog.substring(lastLog.length).trim()); lastLog = finalLog }
+                if (finalLog.contains("done=1 root=1") && finalLog.contains("exploit completed attempt=")) { success = true }
+                if (finalLog.contains("pipe overwrite succeeded")) { success = true }
+                if (finalLog.contains("Am I root? uid=0")) { success = true }
+                if (finalLog.contains("ksud result=0")) { success = true }
+                else if (!success) { finalStatus = if (finalLog.contains("failed")) "Failed" else "Crash" }
+
+                if (success || finalStatus == "Reboot required") break
+                if (relaunches >= maxRelaunches) break
+                relaunches++
+                appendLog("[Retry] No success yet — killing any leftover host and relaunching (retry $relaunches/$maxRelaunches)…")
+                runDiagnosticCommand("kill -9 \$(cat /data/local/tmp/exploit.pid) 2>/dev/null; rm -f $logFilePath /data/local/tmp/exploit.pid", true)
+                lastLog = ""
+                attempts = 0
+                hostPid = ""
+                pidReadTries = 0
+                // Short gap only: a fresh relaunch right after a failure finds a
+                // clean pipe/slab state just as well (user-validated timing).
+                delay(10_000L)
+                }
+
+                if (!success && epermSeen && relaunches >= maxRelaunches) {
+                    appendLog("[!] Pipe page budget exhausted — REBOOT the phone, then run once.")
+                    finalStatus = "Reboot required"
+                }
+
+                if (success) {
+                    finalStatus = "Success"
+                    appendLog("[Success] Root acquired!")
+                    appendLog("[Daemon] Waiting 2s for kernel to stabilize...")
+                    delay(2000)
+                    
+                    if (profile.deviceType == "samsung" && !profile.pathCveNormal.isNullOrEmpty() && !profile.pathCveRoot.isNullOrEmpty()) {
+                        appendLog("[Daemon] Injecting KernelSU via cve-2026-43499-root...")
+                        val rootCmd = "/system/bin/cp /data/local/tmp/ksud /data/local/tmp/ksud-s25u-kdp && " +
+                                      "/system/bin/cp /data/local/tmp/ksud /data/local/tmp/.ksud-stage && " +
+                                      "/system/bin/chmod 755 /data/local/tmp/ksud-s25u-kdp /data/local/tmp/.ksud-stage && " +
+                                      "/data/local/tmp/ksud-s25u-kdp --late-load"
+                        val injectCmd = "/data/local/tmp/cve-2026-43499-root -c '$rootCmd'"
+                        appendLog("[Inject CMD] $injectCmd")
+                        val injectOutput = executeCommandAndReturnOutput(injectCmd, true)
+                        if (injectOutput.isNotBlank()) appendLog("[INJECT] $injectOutput")
+                    } else if (shizukuProfile) {
+                        appendLog("[Daemon] Injection already done by the preload ROOT_STAGE (cp ksud + late-load).")
+                        appendLog("[Pipeline] KernelSU active (check the manager app).")
+                    } else {
+                        appendLog("[Daemon] Injecting KernelSU via temporary su...")
+                        val rootCmd = "/system/bin/cp /data/local/tmp/ksud /data/local/tmp/ksud-s25u-kdp && " +
+                                      "/system/bin/cp /data/local/tmp/ksud /data/local/tmp/.ksud-stage && " +
+                                      "/system/bin/chmod 755 /data/local/tmp/ksud-s25u-kdp /data/local/tmp/.ksud-stage && " +
+                                      "/data/local/tmp/ksud-s25u-kdp --late-load"
+                        val injectCmd = "/data/local/tmp/su -c '$rootCmd'"
+                        appendLog("[Inject CMD] $injectCmd")
+                        val injectOutput = executeCommandAndReturnOutput(injectCmd, true)
+                        if (injectOutput.isNotBlank()) appendLog("[INJECT] $injectOutput")
+                    }
+                    appendLog("[Pipeline] Completed successfully!")
+                } else {
+                    if (finalLog.isBlank()) {
+                        appendLog("[!] /data/local/tmp/exploit.log is EMPTY — the payload never started.")
+                        appendLog("[!] Check the [CMD] line above and that /data/local/tmp/cve.so exists.")
+                    }
+                    appendLog("[Error] Exploit $finalStatus.")
+                }
+
+            } else {
+                // --- MODE LOCAL INTACT (SAMSUNG) ---
+                var logFilePath = ""
+                val nativeLibDir = context.applicationInfo.nativeLibraryDir
+                val helperFile = File(nativeLibDir, "libcve43499root.so")
+                if (!helperFile.exists()) { appendLog("[Error] Helper not found"); return "Failed" }
+                val localSoFile = File(context.filesDir, "cve.so")
+                File(profile.pathSo).inputStream().use { i -> FileOutputStream(localSoFile).use { o -> i.copyTo(o) } }
+                localSoFile.setReadable(true, false); localSoFile.setExecutable(true, false)
+                logFilePath = File(context.filesDir, "exploit.log").absolutePath
+                File(logFilePath).delete()
+                var localRelaunches = 0
+                while (true) {
+                appendLog("[Exploit] Launching via libcve43499root.so...")
+                val pb = ProcessBuilder(helperFile.absolutePath, "--run-payload", localSoFile.absolutePath, helperFile.absolutePath, logFilePath).redirectErrorStream(true)
+                if (kaslr.isNotEmpty()) pb.environment()["SLIDE_P0_OFFSET"] = kaslr
+                // Requis par le build APP du payload (root.c) : chemin absolu du
+                // helper exécuté en root via umh — cf. flux officiel Root-My-Galaxy.
+                pb.environment()["CVE43499_ROOT_HELPER"] = helperFile.absolutePath
+                pb.environment()["EXPLOIT_ATTEMPTS"] = "24"
+                pb.environment()["P0_ATTEMPT_TIMEOUT_SEC"] = "20"
+                process = pb.start()
+
+                appendLog("[Logs] Real-time monitoring (Timeout: 15 min)...")
+                var lastLog = ""
+                var attempts = 0
+                
+                while (process.isAlive && attempts < 3600) {
+                    attempts++; delay(250)
+                    val currentLog = if (File(logFilePath).exists()) File(logFilePath).readText() else ""
+                    if (currentLog.length > lastLog.length) { appendLog(currentLog.substring(lastLog.length).trim()); lastLog = currentLog }
+                    if (currentLog.contains("done=1 root=1") && currentLog.contains("exploit completed attempt=")) { success = true; break }
+                    if (currentLog.contains("pipe overwrite succeeded")) { success = true; break }
+                    if (currentLog.contains("failed")) { finalStatus = "Failed" }
+                    if (!process.isAlive && !currentLog.contains("exploit completed")) { appendLog("[!] Process terminated early."); break }
+                }
+
+                val finalLog = if (File(logFilePath).exists()) File(logFilePath).readText() else ""
+                if (finalLog.length > lastLog.length) { appendLog(finalLog.substring(lastLog.length).trim()); lastLog = finalLog }
+                if (finalLog.contains("done=1 root=1") && finalLog.contains("exploit completed attempt=")) { success = true }
+                if (finalLog.contains("pipe overwrite succeeded")) { success = true }
+                else if (!success) { val early = process.inputStream?.bufferedReader()?.use { it.readText() }?.trim() ?: ""; if (early.isNotEmpty()) appendLog("[STDOUT] $early") }
+
+                if (success || finalStatus == "Reboot required" || localRelaunches >= 2) break
+                localRelaunches++
+                appendLog("[Retry] No success yet — relaunching the payload (retry $localRelaunches/2)…")
+                runCatching { process.destroyForcibly() }
+                attempts = 0
+                lastLog = ""
+                delay(10_000L)
+                }
+
+                if (success) {
+                    appendLog("[Success] Root acquired!")
+                    val ksudPath = profile.pathKsud
+                    val koPath = File(profile.pathKo).absolutePath
+                    appendLog("[Daemon] Preparing ksud...")
+                    val stageCmd = "/system/bin/mkdir -p /data/adb && /system/bin/cp $ksudPath /data/local/tmp/ksud-s25u-kdp && /system/bin/cp $ksudPath /data/local/tmp/.ksud-stage && /system/bin/cp $koPath /data/local/tmp/kernelsu.ko && /system/bin/chmod 755 /data/local/tmp/ksud-s25u-kdp /data/local/tmp/.ksud-stage"
+                    appendLog("[Daemon] Injecting KernelSU (--late-load)...")
+                    
+                    val helperPath = File(context.applicationInfo.nativeLibraryDir, "libcve43499root.so").absolutePath
+                    val stagePb = ProcessBuilder(helperPath, "-c", stageCmd).redirectErrorStream(true)
+                    val stageProcess = stagePb.start()
+                    val stageReader = BufferedReader(InputStreamReader(stageProcess.inputStream))
+                    var sLine: String?
+                    while (stageReader.readLine().also { sLine = it } != null) { sLine?.let { appendLog("[STAGE] $it") } }
+                    stageProcess.waitFor()
+
+                    val latePb = ProcessBuilder(helperPath, "--late-load").redirectErrorStream(true)
+                    val lateProcess = latePb.start()
+                    val lateReader = BufferedReader(InputStreamReader(lateProcess.inputStream))
+                    var lLine: String?
+                    while (lateReader.readLine().also { lLine = it } != null) { lLine?.let { appendLog("[LATE] $it") } }
+                    lateProcess.waitFor()
+                    
+                    appendLog("[Pipeline] Completed successfully!")
+                    finalStatus = "Success"
+                } else if (finalStatus != "Failed") {
+                    appendLog("[Error] Exploit crashed.")
+                }
+                process.destroyForcibly()
+            }
+        } catch (e: Exception) { appendLog("[Error] ${e.localizedMessage}") }
+        
+        if (finalStatus == "Success") markRooted(rawProfile.name)
+        // Root My Galaxy style: every run lands in a shareable .txt box.
+        endRunLog(finalStatus, rawProfile.name, System.currentTimeMillis() - runStartedAt)
+        return finalStatus
+    }
+}
+
+/** java.lang.Process wrapper around the Shizuku IRemoteProcess binder interface. */
+private class ShizukuProcessAdapter(private val remote: moe.shizuku.server.IRemoteProcess) : Process() {
+
+    override fun getOutputStream(): java.io.OutputStream =
+        android.os.ParcelFileDescriptor.AutoCloseOutputStream(remote.outputStream)
+
+    override fun getInputStream(): java.io.InputStream =
+        android.os.ParcelFileDescriptor.AutoCloseInputStream(remote.inputStream)
+
+    override fun getErrorStream(): java.io.InputStream =
+        android.os.ParcelFileDescriptor.AutoCloseInputStream(remote.errorStream)
+
+    override fun waitFor(): Int = remote.waitFor()
+
+    override fun exitValue(): Int = remote.exitValue()
+
+    override fun destroy() = remote.destroy()
+
+    override fun isAlive(): Boolean = remote.alive()
+
+    override fun waitFor(timeout: Long, unit: java.util.concurrent.TimeUnit): Boolean =
+        runCatching { remote.waitForTimeout(unit.toMillis(timeout), "MILLISECONDS") }.getOrDefault(false)
+}

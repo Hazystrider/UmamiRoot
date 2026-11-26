@@ -1,0 +1,160 @@
+name: Build SukiSU-Nova Samsung KDP (LKM + ksud)
+
+on:
+  workflow_dispatch:
+    inputs:
+      sukisu_ref:
+        description: 'SukiSU-Nova commit or tag to patch'
+        required: false
+        default: '1439545f12bffe0263690ba862139b70ee5f20cf'
+        type: string
+      ddk_release:
+        description: 'DDK container release tag'
+        required: false
+        default: '20260828'
+        type: string
+      publish_release:
+        description: 'Publish GitHub Release with ksud + .ko assets'
+        required: false
+        default: true
+        type: boolean
+  push:
+    tags:
+      - 'sukisu-kdp-*'
+
+permissions:
+  contents: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  build-lkm:
+    name: Build Samsung-KDP LKM (${{ matrix.kmi }})
+    runs-on: ubuntu-24.04
+    container:
+      image: ghcr.io/ylarod/ddk-min:${{ matrix.kmi }}-${{ inputs.ddk_release || '20260828' }}
+      options: --privileged
+    strategy:
+      fail-fast: false
+      matrix:
+        kmi:
+          - android12-5.10
+          - android13-5.10
+          - android13-5.15
+          - android14-5.15
+          - android14-6.1
+          - android15-6.6
+          - android16-6.12
+          - android17-6.18
+    steps:
+      - name: Checkout UmamiRoot
+        uses: actions/checkout@v5
+
+      - name: Clone & patch SukiSU-Nova
+        run: |
+          set -eux
+          REF="${{ inputs.sukisu_ref || '1439545f12bffe0263690ba862139b70ee5f20cf' }}"
+          git clone https://github.com/SukiSU-Nova/SukiSU-Nova.git sukisu
+          git -C sukisu checkout "$REF"
+          git -C sukisu apply "${GITHUB_WORKSPACE}/patches/sukisu-nova-samsung-kdp-rkp-defex.patch"
+
+      - name: Build kernelsu.ko with Samsung KDP/RKP/DEFEX
+        run: |
+          set -eux
+          cd sukisu/kernel
+          make -j"$(nproc)" \
+            CONFIG_KSU=m \
+            CONFIG_KPM=y \
+            CONFIG_KSU_SAMSUNG_KDP=y \
+            CONFIG_KSU_SAMSUNG_RKP=y \
+            CONFIG_KSU_SAMSUNG_DEFEX=y \
+            CONFIG_KSU_SAMSUNG_NO_PATCH_TEXT=y \
+            CC=clang
+          mkdir -p "${GITHUB_WORKSPACE}/out"
+          cp kernelsu.ko "${GITHUB_WORKSPACE}/out/${{ matrix.kmi }}_kernelsu.ko"
+          llvm-strip -d "${GITHUB_WORKSPACE}/out/${{ matrix.kmi }}_kernelsu.ko"
+          # Verify Samsung KDP/DEFEX/RKP symbols exist in the compiled .ko
+          llvm-nm "${GITHUB_WORKSPACE}/out/${{ matrix.kmi }}_kernelsu.ko" | grep -q "ksu_samsung_kdp_init"
+          llvm-nm "${GITHUB_WORKSPACE}/out/${{ matrix.kmi }}_kernelsu.ko" | grep -q "ksu_samsung_defex_init"
+          llvm-nm "${GITHUB_WORKSPACE}/out/${{ matrix.kmi }}_kernelsu.ko" | grep -q "ksu_samsung_rkp_init"
+          ls -lh "${GITHUB_WORKSPACE}/out/${{ matrix.kmi }}_kernelsu.ko"
+
+      - name: Upload LKM artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: lkm-${{ matrix.kmi }}
+          path: out/${{ matrix.kmi }}_kernelsu.ko
+          retention-days: 14
+
+  build-ksud:
+    name: Build SukiSU-Nova Samsung-KDP ksud (aarch64)
+    needs: build-lkm
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout UmamiRoot
+        uses: actions/checkout@v5
+
+      - name: Clone & patch SukiSU-Nova
+        run: |
+          set -eux
+          REF="${{ inputs.sukisu_ref || '1439545f12bffe0263690ba862139b70ee5f20cf' }}"
+          git clone https://github.com/SukiSU-Nova/SukiSU-Nova.git sukisu
+          git -C sukisu checkout "$REF"
+          git -C sukisu apply "${GITHUB_WORKSPACE}/patches/sukisu-nova-samsung-kdp-rkp-defex.patch"
+
+      - name: Download compiled Samsung-KDP LKMs
+        uses: actions/download-artifact@v5
+        with:
+          pattern: lkm-*
+          path: lkm-artifacts
+          merge-multiple: true
+
+      - name: Stage LKMs & ksuinit for rust-embed
+        run: |
+          set -eux
+          mkdir -p sukisu/userspace/ksud/bin/aarch64
+          cp lkm-artifacts/*_kernelsu.ko sukisu/userspace/ksud/bin/aarch64/
+          curl -fSL -o sukisu/userspace/ksud/bin/aarch64/ksuinit \
+            https://github.com/SukiSU-Nova/SukiSU-Nova/releases/download/v3.0.0/ksuinit-aarch64
+          ls -lh sukisu/userspace/ksud/bin/aarch64/
+
+      - name: Set up Rust Android target
+        run: |
+          set -eux
+          rustup target add aarch64-linux-android
+
+      - name: Build ksud (aarch64-linux-android)
+        run: |
+          set -eux
+          cd sukisu
+          export ANDROID_NDK_HOME="${ANDROID_NDK_LATEST_HOME:-$ANDROID_NDK_ROOT}"
+          source .github/scripts/setup-rust-build.sh aarch64-linux-android 26
+          cargo build --target aarch64-linux-android --release \
+            --manifest-path ./userspace/ksud/Cargo.toml
+          mkdir -p "${GITHUB_WORKSPACE}/dist"
+          cp userspace/ksud/target/aarch64-linux-android/release/ksud \
+            "${GITHUB_WORKSPACE}/dist/ksud-sukisu-nova-samsung-kdp-aarch64"
+          cp "${GITHUB_WORKSPACE}/lkm-artifacts"/*_kernelsu.ko "${GITHUB_WORKSPACE}/dist/"
+          ls -lh "${GITHUB_WORKSPACE}/dist/"
+
+      - name: Upload ksud + LKM bundle
+        uses: actions/upload-artifact@v6
+        with:
+          name: sukisu-nova-samsung-kdp-bundle
+          path: dist/*
+          retention-days: 30
+
+      - name: Publish GitHub Release
+        if: ${{ inputs.publish_release == true || startsWith(github.ref, 'refs/tags/sukisu-kdp-') }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eux
+          TAG="${GITHUB_REF_NAME}"
+          if [[ "$TAG" != sukisu-kdp-* ]]; then
+            TAG="sukisu-kdp-$(date -u +%Y%m%d-%H%M%S)"
+          fi
+          gh release create "$TAG" dist/* \
+            --title "SukiSU-Nova Samsung KDP/RKP/DEFEX ($TAG)" \
+            --notes "Samsung KDP/RKP/DEFEX-patched SukiSU-Nova GKI LKM modules (android12-5.10 .. android17-6.18) and ksud-aarch64-linux-android with embedded KDP LKMs and DEFEX-safe late-load staging."
