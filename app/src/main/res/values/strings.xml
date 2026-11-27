@@ -41,7 +41,8 @@
     <string name="new_method_rooted_no_grant">Phone is rooted — allow UniRoot in KernelSU (Next) to confirm it in-app</string>
     <string name="new_method_failed">New method failed — see the log (a retry or a reboot helps)</string>
     <string name="flavor_kernelsu">KernelSU</string>
-    <string name="flavor_ksunext">KernelSU Next</string>
+    <string name="flavor_ksunext">KSU Next</string>
+    <string name="flavor_sukisu">SukiSU-Nova</string>
     <string name="shizuku_label">Shizuku mode (UID 2000)</string>
     <string name="shizuku_summary">Required for S26 Ultra. Run the exploit as shell instead of the app.</string>
     <string name="log_title">Execution log</string>

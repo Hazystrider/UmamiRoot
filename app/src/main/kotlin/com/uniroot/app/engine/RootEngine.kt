@@ -99,6 +99,10 @@ class RootEngine(private val context: Context) {
         get() = prefs.getString("ksud_next_profile", "") ?: ""
         set(value) = prefs.edit().putString("ksud_next_profile", value).apply()
 
+    var ksudSukisuProfile: String
+        get() = prefs.getString("sukisu_nova_profile", "") ?: ""
+        set(value) = prefs.edit().putString("sukisu_nova_profile", value).apply()
+
     fun latestKsuTag(): String = prefs.getString("latest_ksu_tag", "") ?: ""
 
     fun setLatestKsuTag(tag: String) = prefs.edit().putString("latest_ksu_tag", tag).apply()
@@ -562,17 +566,32 @@ class RootEngine(private val context: Context) {
 
     /** Custom ksud slot read by DFBridge.stageKsud (wins over bundled profiles). */
     fun customKsudFile(next: Boolean): File =
-        File(context.filesDir.parentFile ?: context.filesDir, if (next) "ksud-custom-next" else "ksud-custom-classic")
+        customKsudFile(if (next) "kernelsu_next" else "kernelsu")
 
-    fun customKsudStatus(next: Boolean): String {
-        val f = customKsudFile(next)
+    fun customKsudFile(flavor: String): File {
+        val name = when (flavor) {
+            "kernelsu_next" -> "ksud-custom-next"
+            "sukisu_nova" -> "ksud-custom-sukisu"
+            else -> "ksud-custom-classic"
+        }
+        return File(context.filesDir.parentFile ?: context.filesDir, name)
+    }
+
+    fun customKsudStatus(next: Boolean): String =
+        customKsudStatus(if (next) "kernelsu_next" else "kernelsu")
+
+    fun customKsudStatus(flavor: String): String {
+        val f = customKsudFile(flavor)
         if (!f.isFile || f.length() <= 100_000L) return ""
         val mb = f.length() / (1024.0 * 1024.0)
         return String.format("Custom ksud active (%.2f MB)", mb)
     }
 
-    fun importCustomKsud(uri: android.net.Uri, next: Boolean): Result<String> = runCatching {
-        val dest = customKsudFile(next)
+    fun importCustomKsud(uri: android.net.Uri, next: Boolean): Result<String> =
+        importCustomKsud(uri, if (next) "kernelsu_next" else "kernelsu")
+
+    fun importCustomKsud(uri: android.net.Uri, flavor: String): Result<String> = runCatching {
+        val dest = customKsudFile(flavor)
         val tmp = File(dest.parentFile, dest.name + ".tmp")
         val stream = context.contentResolver.openInputStream(uri)
             ?: error("Could not read selected file")
@@ -593,11 +612,14 @@ class RootEngine(private val context: Context) {
         require(tmp.renameTo(dest)) { "Could not save custom ksud" }
         dest.setReadable(true, false)
         dest.setExecutable(true, false)
-        customKsudStatus(next)
+        customKsudStatus(flavor)
     }
 
-    fun clearCustomKsud(next: Boolean): Boolean {
-        val f = customKsudFile(next)
+    fun clearCustomKsud(next: Boolean): Boolean =
+        clearCustomKsud(if (next) "kernelsu_next" else "kernelsu")
+
+    fun clearCustomKsud(flavor: String): Boolean {
+        val f = customKsudFile(flavor)
         val existed = f.isFile
         runCatching { f.delete() }
         return existed

@@ -62,6 +62,7 @@ class MainActivity : ComponentActivity(), Shizuku.OnRequestPermissionResultListe
     private var latestKsuTag by mutableStateOf("")
     private var autoRootOnBoot by mutableStateOf(false)
     private var ksuNextMode by mutableStateOf(false)
+    private var ksuFlavor by mutableStateOf("kernelsu")
     private var rmgStatus by mutableStateOf("")
     private var tab by mutableStateOf(UniTab.UNIROOT)
     private var runLogs by mutableStateOf(listOf<RunLogFile>())
@@ -86,6 +87,8 @@ class MainActivity : ComponentActivity(), Shizuku.OnRequestPermissionResultListe
     private var ksudNextProfileId by mutableStateOf("")
     private var ksudClassicProfiles by mutableStateOf<List<KsudClassicProfiles.ClassicProfile>>(emptyList())
     private var ksudClassicProfileId by mutableStateOf("")
+    private var ksudSukisuProfiles by mutableStateOf<List<KsudNextProfile>>(emptyList())
+    private var ksudSukisuProfileId by mutableStateOf("")
     // DEV — updater ksud Next (blue button, new method section).
     private var ksudUpdateRunning by mutableStateOf(false)
     private var ksudUpdateLog by mutableStateOf("")
@@ -109,14 +112,17 @@ class MainActivity : ComponentActivity(), Shizuku.OnRequestPermissionResultListe
         useLatestKsu = engine.useLatestKsu
         latestKsuTag = engine.latestKsuTag()
         autoRootOnBoot = engine.autoRootOnBoot
-        ksuNextMode = engine.ksuFlavor == "kernelsu_next"
+        ksuFlavor = engine.ksuFlavor.takeIf { it in setOf("kernelsu", "kernelsu_next", "sukisu_nova") } ?: "kernelsu"
+        ksuNextMode = ksuFlavor == "kernelsu_next"
         kernelManagerId = engine.kernelManagerId
         customManagerPackage = engine.customManagerPackage
-        // New méthode : profils ksud Next embarqués + sélection persistée.
+        // New méthode : profils ksud embarqués + sélection persistée.
         ksudNextProfiles = KsudNextProfiles.list(this)
         ksudNextProfileId = KsudNextProfiles.selected(this)?.id ?: ""
         ksudClassicProfiles = KsudClassicProfiles.list(this)
         ksudClassicProfileId = KsudClassicProfiles.selected(this)?.id ?: ""
+        ksudSukisuProfiles = com.uniroot.app.newmethod.ReSukisuNovaProfiles.list(this)
+        ksudSukisuProfileId = com.uniroot.app.newmethod.ReSukisuNovaProfiles.selected(this)?.id ?: ""
         val appPrefs = getSharedPreferences("uniroot_prefs", MODE_PRIVATE)
         newMethod = if (appPrefs.contains("root_method_new")) {
             appPrefs.getBoolean("root_method_new", false)
@@ -178,6 +184,7 @@ class MainActivity : ComponentActivity(), Shizuku.OnRequestPermissionResultListe
                     autoRootOnBoot = autoRootOnBoot,
                     rmgStatus = rmgStatus,
                     ksuNextMode = ksuNextMode,
+                    ksuFlavor = ksuFlavor,
                     tab = tab,
                     runLogs = runLogs,
                     logViewerFile = logViewerFile,
@@ -200,6 +207,8 @@ class MainActivity : ComponentActivity(), Shizuku.OnRequestPermissionResultListe
                     ksudNextProfileId = ksudNextProfileId,
                     ksudClassicProfiles = ksudClassicProfiles,
                     ksudClassicProfileId = ksudClassicProfileId,
+                    ksudSukisuProfiles = ksudSukisuProfiles,
+                    ksudSukisuProfileId = ksudSukisuProfileId,
                     ksudUpdateRunning = ksudUpdateRunning,
                     ksudUpdateLog = ksudUpdateLog,
                     ksudUpdateSheetVisible = ksudUpdateSheetVisible,
@@ -239,12 +248,17 @@ class MainActivity : ComponentActivity(), Shizuku.OnRequestPermissionResultListe
                         ksudUpdateProgress = 0
                         ksudUpdateStage = ""
                         ksudUpdateSheetVisible = true
+                        val targetFlavor = when (ksuFlavor) {
+                            "sukisu_nova" -> com.uniroot.app.newmethod.DfKsudUpdater.Flavor.SUKISU_NOVA
+                            "kernelsu_next" -> com.uniroot.app.newmethod.DfKsudUpdater.Flavor.NEXT
+                            else -> com.uniroot.app.newmethod.DfKsudUpdater.Flavor.CLASSIC
+                        }
                         lifecycleScope.launch {
                             val result = runCatching {
                                 withContext(Dispatchers.IO) {
                                     com.uniroot.app.newmethod.DfKsudUpdater.run(
                                         this@MainActivity,
-                                        !ksuNextMode,
+                                        targetFlavor,
                                         { line ->
                                             ksudUpdateLog += line + "\n"
                                             engine.appendLog("[KsudUpdate] $line")
@@ -264,6 +278,9 @@ class MainActivity : ComponentActivity(), Shizuku.OnRequestPermissionResultListe
                             engine.ksudNextProfile = ksudNextProfileId
                             ksudClassicProfiles = KsudClassicProfiles.list(this@MainActivity)
                             ksudClassicProfileId = KsudClassicProfiles.selected(this@MainActivity)?.id ?: ""
+                            ksudSukisuProfiles = com.uniroot.app.newmethod.ReSukisuNovaProfiles.list(this@MainActivity)
+                            ksudSukisuProfileId = com.uniroot.app.newmethod.ReSukisuNovaProfiles.selected(this@MainActivity)?.id ?: ""
+                            engine.ksudSukisuProfile = ksudSukisuProfileId
                             ksudUpdateRunning = false
                         }
                     }
@@ -284,10 +301,24 @@ class MainActivity : ComponentActivity(), Shizuku.OnRequestPermissionResultListe
                             engine.ksudNextProfile = ksudNextProfileId
                         }
                     }
+                    override fun onDeleteKsudSukisuProfile(id: String) {
+                        if (!com.uniroot.app.newmethod.ReSukisuNovaProfiles.deleteDynamic(this@MainActivity, id)) return
+                        engine.appendLog("[KsudUpdate] SukiSU-Nova profile deleted: $id")
+                        ksudSukisuProfiles = com.uniroot.app.newmethod.ReSukisuNovaProfiles.list(this@MainActivity)
+                        ksudSukisuProfileId = com.uniroot.app.newmethod.ReSukisuNovaProfiles.selected(this@MainActivity)?.id ?: ""
+                        engine.ksudSukisuProfile = ksudSukisuProfileId
+                    }
                     override fun onKsudClassicProfileChanged(id: String) {
                         ksudClassicProfileId = id
                         KsudClassicProfiles.setSelected(this@MainActivity, id)
                         engine.appendLog("[NewMethod] profil ksud classic : $id")
+                    }
+                    override fun onKsudSukisuProfileChanged(id: String) {
+                        ksudSukisuProfileId = id
+                        com.uniroot.app.newmethod.ReSukisuNovaProfiles.setSelected(this@MainActivity, id)
+                        engine.ksudSukisuProfile = id
+                        val label = ksudSukisuProfiles.firstOrNull { it.id == id }?.label ?: id
+                        engine.appendLog("[NewMethod] SukiSU-Nova profile: $label")
                     }
                     override fun onDisableRoot() = disableRoot()
                     override fun onInstantRootEnable() { instantRootOfferVisible = false; enableInstantRoot() }
@@ -390,13 +421,19 @@ class MainActivity : ComponentActivity(), Shizuku.OnRequestPermissionResultListe
                     }
                     override fun onShizukuChanged(enabled: Boolean) { shizukuEnabled = enabled }
                     override fun onKsuFlavorChanged(next: Boolean) {
-                        ksuNextMode = next
-                        engine.ksuFlavor = if (next) "kernelsu_next" else "kernelsu"
+                        onKsuFlavorSelected(if (next) "kernelsu_next" else "kernelsu")
+                    }
+                    override fun onKsuFlavorSelected(flavor: String) {
+                        val normalized = flavor.takeIf { it in setOf("kernelsu", "kernelsu_next", "sukisu_nova") } ?: "kernelsu"
+                        ksuFlavor = normalized
+                        ksuNextMode = normalized == "kernelsu_next"
+                        engine.ksuFlavor = normalized
                         // The new method stages its ksud per flavor too.
                         createDeviceProtectedStorageContext()
                             .getSharedPreferences(com.uniroot.app.newmethod.NewMethodBootReceiver.PREFS, MODE_PRIVATE)
                             .edit()
-                            .putBoolean(com.uniroot.app.newmethod.NewMethodBootReceiver.PREF_NEXT, next)
+                            .putBoolean(com.uniroot.app.newmethod.NewMethodBootReceiver.PREF_NEXT, ksuNextMode)
+                            .putString(com.uniroot.app.newmethod.NewMethodBootReceiver.PREF_FLAVOR, normalized)
                             .apply()
                         refreshProfiles()
                         refreshKernelManagerState()
@@ -408,8 +445,9 @@ class MainActivity : ComponentActivity(), Shizuku.OnRequestPermissionResultListe
                         engine.kernelManagerId = type.id
                         // Align backend flavor automatically when the manager specifies one.
                         type.prefersNextBackend?.let { wantNext ->
-                            if (ksuNextMode != wantNext) {
-                                onKsuFlavorChanged(wantNext)
+                            val target = if (wantNext) "kernelsu_next" else "kernelsu"
+                            if (ksuFlavor != target) {
+                                onKsuFlavorSelected(target)
                                 return
                             }
                         }
@@ -430,7 +468,7 @@ class MainActivity : ComponentActivity(), Shizuku.OnRequestPermissionResultListe
                     override fun onImportCustomKsud(uri: Uri) {
                         lifecycleScope.launch {
                             val res = withContext(Dispatchers.IO) {
-                                engine.importCustomKsud(uri, ksuNextMode)
+                                engine.importCustomKsud(uri, ksuFlavor)
                             }
                             refreshKernelManagerState()
                             val msg = res.getOrElse { "Import failed: ${it.message}" }
@@ -442,6 +480,11 @@ class MainActivity : ComponentActivity(), Shizuku.OnRequestPermissionResultListe
                     override fun onFetchManagerKsud() {
                         if (managerFetchRunning) return
                         val mgr = engine.selectedKernelManager()
+                        if (mgr == com.uniroot.app.engine.KernelManagerType.SUKISU_NOVA) {
+                            if (ksuFlavor != "sukisu_nova") onKsuFlavorSelected("sukisu_nova")
+                            onUpdateKsud()
+                            return
+                        }
                         if (mgr.githubRepos.isEmpty()) {
                             Toast.makeText(this@MainActivity, "No GitHub repo for ${mgr.displayName}", Toast.LENGTH_SHORT).show()
                             return
@@ -454,7 +497,7 @@ class MainActivity : ComponentActivity(), Shizuku.OnRequestPermissionResultListe
                                     com.uniroot.app.newmethod.ManagerReleaseFetcher.fetchLatest(
                                         context = this@MainActivity,
                                         manager = mgr,
-                                        destFile = engine.customKsudFile(ksuNextMode),
+                                        destFile = engine.customKsudFile(ksuFlavor),
                                         log = { line ->
                                             engine.appendLog("[ManagerFetch] $line")
                                             runOnUiThread { managerFetchStatus = line }
@@ -479,7 +522,7 @@ class MainActivity : ComponentActivity(), Shizuku.OnRequestPermissionResultListe
                         }
                     }
                     override fun onClearCustomKsud() {
-                        engine.clearCustomKsud(ksuNextMode)
+                        engine.clearCustomKsud(ksuFlavor)
                         managerFetchStatus = ""
                         refreshKernelManagerState()
                         engine.appendLog("[CustomKsud] Reset to bundled ksud")
@@ -588,7 +631,7 @@ class MainActivity : ComponentActivity(), Shizuku.OnRequestPermissionResultListe
                 "Not installed — install ${sel.displayName} APK or choose another manager"
             }
         }
-        customKsudStatus = engine.customKsudStatus(ksuNextMode)
+        customKsudStatus = engine.customKsudStatus(ksuFlavor)
     }
 
     private fun refreshDeviceInfoPanel() {
@@ -737,7 +780,12 @@ class MainActivity : ComponentActivity(), Shizuku.OnRequestPermissionResultListe
         sheetDismissible = false
         newMethodProgress = 5
         newMethodStage = "Loading DF engine…"
-        engine.appendLog("[NewMethod] moteur DF (base 4.4.8 éprouvée, DirtyFrag CVE-2026-43284) — " + (if (ksuNextMode) "KernelSU Next" else "KernelSU"))
+        val flavorLabel = when (ksuFlavor) {
+            "kernelsu_next" -> "KernelSU Next"
+            "sukisu_nova" -> "SukiSU-Nova"
+            else -> "KernelSU"
+        }
+        engine.appendLog("[NewMethod] moteur DF (base 4.4.8 éprouvée, DirtyFrag CVE-2026-43284) — $flavorLabel")
         lifecycleScope.launch {
             engine.setRunning(true)
             val t0 = android.os.SystemClock.elapsedRealtime()
@@ -745,7 +793,7 @@ class MainActivity : ComponentActivity(), Shizuku.OnRequestPermissionResultListe
             try {
                 rc = withContext(Dispatchers.IO) {
                     com.uniroot.app.newmethod.DfEngine.run(
-                        this@MainActivity, ksuNextMode, newMethodSoftReboot,
+                        this@MainActivity, ksuFlavor, newMethodSoftReboot,
                         { line -> engine.appendLog(line.trimEnd()) },
                         { pct, stage ->
                             newMethodProgress = pct
@@ -756,7 +804,7 @@ class MainActivity : ComponentActivity(), Shizuku.OnRequestPermissionResultListe
                 if (rc == 0) {
                     newMethodProgress = 100
                     newMethodStage = "Phone rooted ✓"
-                    engine.markRooted("DF", if (ksuNextMode) "kernelsu_next" else "kernelsu")
+                    engine.markRooted("DF", ksuFlavor)
                     refreshDeviceInfoPanel()
                     Toast.makeText(this@MainActivity, R.string.phone_rooted_toast, Toast.LENGTH_LONG).show()
                     if (newMethodSoftReboot) {

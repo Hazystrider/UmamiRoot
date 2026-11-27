@@ -25,15 +25,27 @@ import java.security.SecureRandom;
  */
 public final class DFBridge {
 
-    private static boolean loaded = false;
+    private static String loadedLib = null;
 
     private DFBridge() {}
 
-    /** Loads the flavor-matching native engine (same JNI symbol in both). */
+    /** Loads the flavor-matching native library (same JNI symbol in all three). */
     public static synchronized void load(boolean next) {
-        if (loaded) return;
-        System.loadLibrary(next ? "expnext" : "exp");
-        loaded = true;
+        load(next ? "kernelsu_next" : "kernelsu");
+    }
+
+    public static synchronized void load(String flavor) {
+        String lib;
+        if ("kernelsu_next".equals(flavor)) {
+            lib = "expnext";
+        } else if ("sukisu_nova".equals(flavor)) {
+            lib = "expsukisu";
+        } else {
+            lib = "exp";
+        }
+        if (lib.equals(loadedLib)) return;
+        System.loadLibrary(lib);
+        loadedLib = lib;
     }
 
     public static native int nativeRunAll(IReporter reporter, int encapPort, int spi,
@@ -42,7 +54,13 @@ public final class DFBridge {
 
     /** One full privileged-free root run. Returns the engine rc (0 = rooted). */
     public static int run(Context context, boolean next, boolean softReboot, IReporter reporter) {
+        return run(context, next ? "kernelsu_next" : "kernelsu", softReboot, reporter);
+    }
+
+    /** Flavor-aware privileged-free root run ("kernelsu", "kernelsu_next", "sukisu_nova"). */
+    public static int run(Context context, String flavor, boolean softReboot, IReporter reporter) {
         try {
+            boolean isNext = "kernelsu_next".equals(flavor);
             IpSecManager ipsec = (IpSecManager) context.getSystemService(Context.IPSEC_SERVICE);
 
             IpSecManager.UdpEncapsulationSocket encapSock = ipsec.openUdpEncapsulationSocket();
@@ -71,10 +89,10 @@ public final class DFBridge {
                     .setIpv4Encapsulation(encapSock, senderPort)
                     .buildTransportModeTransform(loopback, spiObj);
 
-            stageKsud(context, next, reporter);
+            stageKsud(context, flavor, reporter, null);
 
             // The Next ksud CLI rejects --soft-reboot: never pass it there.
-            boolean sb = next ? false : softReboot;
+            boolean sb = isNext ? false : softReboot;
             int rc = nativeRunAll(reporter, encapPort, spiVal, aesKey, hmacKey, 128 / 8, senderPort, sb);
 
             transform.close();
@@ -89,7 +107,7 @@ public final class DFBridge {
 
     /** Stages the flavor's ksud (user-patched custom first, then bundled). */
     public static void stageKsud(Context context, boolean next, IReporter reporter) throws IOException {
-        stageKsud(context, next, reporter, null);
+        stageKsud(context, next ? "kernelsu_next" : "kernelsu", reporter, null);
     }
 
     /**
@@ -99,11 +117,21 @@ public final class DFBridge {
      */
     public static void stageKsud(Context context, boolean next, IReporter reporter,
                                  String ksudNextAsset) throws IOException {
+        stageKsud(context, next ? "kernelsu_next" : "kernelsu", reporter, ksudNextAsset);
+    }
+
+    /** Flavor-aware staging ("kernelsu", "kernelsu_next", "sukisu_nova"). */
+    public static void stageKsud(Context context, String flavor, IReporter reporter,
+                                 String explicitAsset) throws IOException {
         File root = context.getFilesDir().getParentFile();
-        // User-patched ksud (Advanced -> Patch custom ko): wins over bundled.
-        File custom = new File(root, next ? "ksud-custom-next" : "ksud-custom-classic");
+        boolean isNext = "kernelsu_next".equals(flavor);
+        boolean isSukisu = "sukisu_nova".equals(flavor);
+
+        // User-patched custom ksud wins over bundled/dynamic profiles.
+        String customName = isSukisu ? "ksud-custom-sukisu" : (isNext ? "ksud-custom-next" : "ksud-custom-classic");
+        File custom = new File(root, customName);
         if (custom.isFile() && custom.length() > 100_000) {
-            if (next) {
+            if (isNext) {
                 copyFile(custom, new File(root, "ksud-next-real"));
                 stageAsset(context, "df/ksud-wrapper-next.sh", new File(root, "ksud"), reporter);
             } else {
@@ -112,7 +140,22 @@ public final class DFBridge {
             reporter.report("staged CUSTOM ksud (" + custom.length() + " bytes)\n");
             return;
         }
-        if (!next) {
+        if (isSukisu) {
+            java.io.File dynSukisu = com.uniroot.app.newmethod.ReSukisuNovaProfiles.selectedFile(context);
+            if (dynSukisu != null && dynSukisu.isFile()) {
+                copyFile(dynSukisu, new File(root, "ksud"));
+                reporter.report("staged DYNAMIC SukiSU-Nova ksud " + dynSukisu.getName()
+                        + " (" + dynSukisu.length() + " bytes)\n");
+                return;
+            }
+            String asset = explicitAsset != null
+                    ? explicitAsset
+                    : com.uniroot.app.newmethod.ReSukisuNovaProfiles.resolveAsset(context);
+            if (asset == null) asset = "df/ksud-sukisu/3.0.0-kdp-samsung";
+            stageAsset(context, asset, new File(root, "ksud"), reporter);
+            return;
+        }
+        if (!isNext) {
             // Classic flavor: the SELECTED classic profile wins (a ksud
             // downloaded by DfKsudUpdater = ksud-classic-latest); the bundled
             // universal is the fallback.
@@ -138,8 +181,8 @@ public final class DFBridge {
                     + " (" + dyn.length() + " bytes)\n");
             return;
         }
-        String asset = ksudNextAsset != null
-                ? ksudNextAsset
+        String asset = explicitAsset != null
+                ? explicitAsset
                 : com.uniroot.app.newmethod.KsudNextProfiles.resolveAsset(context);
         if (asset == null) asset = "df/ksud-new-next";
         stageAsset(context, asset, new File(root, "ksud"), reporter);
