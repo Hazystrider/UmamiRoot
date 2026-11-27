@@ -76,6 +76,9 @@ class DfBootService : Service() {
             val prefs = createDeviceProtectedStorageContext()
                 .getSharedPreferences(NewMethodBootReceiver.PREFS, Context.MODE_PRIVATE)
             val next = prefs.getBoolean(NewMethodBootReceiver.PREF_NEXT, false)
+            val flavor = prefs.getString(NewMethodBootReceiver.PREF_FLAVOR, null)
+                ?.takeIf { it.isNotBlank() }
+                ?: if (next) "kernelsu_next" else "kernelsu"
             val softReboot = prefs.getBoolean(NewMethodBootReceiver.PREF_AUTO_SOFT_REBOOT, true)
 
             // 1. Wait for the first unlock (CE storage) — ≤4 min.
@@ -102,15 +105,15 @@ class DfBootService : Service() {
                     bootLog("already hooked — root is up")
                     return
                 }
-                bootLog("=== boot attempt $attempt/6 (next=$next) ===")
-                val rc = DfEngine.run(applicationContext, next, softReboot, { msg ->
+                bootLog("=== boot attempt $attempt/6 (flavor=$flavor) ===")
+                val rc = DfEngine.run(applicationContext, flavor, softReboot, { msg ->
                     bootLog(msg.trim())
                 }, { _, _ -> })
                 bootLog("=== attempt $attempt rc=$rc ===")
                 if (rc == 0) {
                     com.uniroot.app.engine.BootRootState.markRooted(
                         applicationContext,
-                        if (next) "kernelsu_next" else "kernelsu",
+                        flavor,
                     )
                     return
                 }

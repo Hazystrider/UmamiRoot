@@ -30,15 +30,34 @@ object DfEngine {
         softReboot: Boolean,
         onLog: (String) -> Unit,
         onProgress: (Int, String) -> Unit,
+    ): Int = run(
+        context = context,
+        flavor = if (ksuNext) "kernelsu_next" else "kernelsu",
+        softReboot = softReboot,
+        onLog = onLog,
+        onProgress = onProgress,
+    )
+
+    fun run(
+        context: Context,
+        flavor: String,
+        softReboot: Boolean,
+        onLog: (String) -> Unit,
+        onProgress: (Int, String) -> Unit,
     ): Int {
         val done = AtomicBoolean(false)
         stage = "Loading DF engine…"
         milestone = 12
         onProgress(milestone, stage)
 
-        df.root.DFBridge.load(ksuNext)
-        val flavor = if (ksuNext) "KernelSU Next" else "KernelSU"
-        stage = "DF engine ready ($flavor)"
+        val isNext = flavor == "kernelsu_next"
+        df.root.DFBridge.load(isNext)
+        val flavorLabel = when (flavor) {
+            "kernelsu_next" -> "KernelSU Next"
+            "sukisu_nova" -> "SukiSU-Nova"
+            else -> "KernelSU"
+        }
+        stage = "DF engine ready ($flavorLabel)"
         milestone = 25
         onProgress(milestone, stage)
 
@@ -52,7 +71,7 @@ object DfEngine {
         }, "df-progress").apply { isDaemon = true; start() }
 
         val rc = try {
-            df.root.DFBridge.run(context, ksuNext, softReboot, object : df.root.IReporter {
+            df.root.DFBridge.run(context, flavor, softReboot, object : df.root.IReporter {
                 override fun report(msg: String?) {
                     if (msg.isNullOrBlank()) return
                     onLog(msg)

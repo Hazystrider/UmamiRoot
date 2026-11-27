@@ -4,7 +4,11 @@ import android.content.Context
 import java.io.File
 
 /**
- * SukiSU-Nova ksud profiles (embedded in assets/df/sukisu-nova/ and dynamic in filesDir/sukisu-nova/).
+ * SukiSU-Nova ksud profiles for the new method — mirrors KsudNextProfiles.
+ *
+ * TWO SOURCES:
+ *  1. EMBEDDED — assets/df/ksud-sukisu/<id> (+ optional <id>.txt sidecar).
+ *  2. DYNAMIC  — filesDir/ksud-sukisu/<id>: downloaded/patched by DfKsudUpdater.
  */
 object ReSukisuNovaProfiles {
 
@@ -15,11 +19,20 @@ object ReSukisuNovaProfiles {
     )
 
     /**
-     * Parses both naming conventions:
-     * - "kdp-samsung-v6.0.0" -> version="6.0.0", variant="kdp-samsung", label="kdp-samsung-v6.0.0"
-     * - "6.0.0-kdp-samsung"  -> version="6.0.0", variant="kdp-samsung", label="6.0.0 · kdp-samsung"
+     * Parses SukiSU-Nova profile IDs:
+     * - "sukisu-kdp-20261127-041000" -> version="20261127.041000", variant="kdp-samsung", label="20261127 · kdp-samsung"
+     * - "kdp-samsung-v3.0.0"         -> version="3.0.0", variant="kdp-samsung", label="kdp-samsung-v3.0.0"
+     * - "3.0.0-kdp-samsung"          -> version="3.0.0", variant="kdp-samsung", label="3.0.0 · kdp-samsung"
+     * - "3.0.0-sukisu-nova"          -> version="3.0.0", variant="sukisu-nova", label="3.0.0 · sukisu-nova"
      */
     internal fun parseProfileId(name: String): ParsedProfileId {
+        val kdpDate = Regex("^sukisu-kdp-(\\d{8})(?:-(\\d{6}))?$").matchEntire(name)
+        if (kdpDate != null) {
+            val date = kdpDate.groupValues[1]
+            val time = kdpDate.groupValues[2]
+            val ver = if (time.isNotEmpty()) "$date.$time" else date
+            return ParsedProfileId(version = ver, variant = "kdp-samsung", label = "$date · kdp-samsung")
+        }
         val prefixed = Regex("^(.+)-v(\\d+(?:\\.\\d+)*)$").matchEntire(name)
         if (prefixed != null) {
             val variant = prefixed.groupValues[1]
@@ -33,14 +46,14 @@ object ReSukisuNovaProfiles {
         return ParsedProfileId(version = version, variant = variant, label = label)
     }
 
-    private const val DIR = "df/sukisu-nova"
+    private const val DIR = "df/ksud-sukisu"
     private const val PREFS = "uniroot_prefs"
     private const val PREF_KEY = "sukisu_nova_profile"
     private const val MODE = Context.MODE_PRIVATE
 
-    /** Dynamic profiles folder. */
+    /** Dynamic profiles folder (downloaded/patched by DfKsudUpdater). */
     fun dynamicDir(context: Context): File =
-        File(context.filesDir, "sukisu-nova").apply { mkdirs() }
+        File(context.filesDir, "ksud-sukisu").apply { mkdirs() }
 
     /** Profils embarqués + dynamiques, triés version décroissante puis slug. */
     fun list(context: Context): List<KsudNextProfile> {

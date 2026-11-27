@@ -26,6 +26,7 @@ class NewMethodBootReceiver : BroadcastReceiver() {
     companion object {
         const val PREFS = "uniroot_newmethod"
         const val PREF_NEXT = "flavor_next"
+        const val PREF_FLAVOR = "flavor_id"
         const val PREF_AUTO_SOFT_REBOOT = "auto_soft_reboot"
     }
 }

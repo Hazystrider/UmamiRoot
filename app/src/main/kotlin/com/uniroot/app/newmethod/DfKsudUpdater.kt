@@ -29,10 +29,19 @@ import java.util.zip.ZipException
  */
 object DfKsudUpdater {
 
+    enum class Flavor {
+        CLASSIC,
+        NEXT,
+        SUKISU_NOVA,
+    }
+
     private val REPOS_NEXT = listOf("KernelSU-Next/KernelSU-Next", "rifsxd/KernelSU-Next")
     private val REPOS_CLASSIC = listOf("tiann/KernelSU", "KernelSU/KernelSU")
+    private val REPOS_SUKISU_KDP = listOf("Hazystrider/UmamiRoot")
+    private val REPOS_SUKISU_UPSTREAM = listOf("SukiSU-Nova/SukiSU-Nova")
     private const val KO_ASSET_DIR = "df/samsung-ko"
     private const val KO_ASSET_DIR_CLASSIC = "df/samsung-ko-classic"
+    private const val KO_ASSET_DIR_SUKISU = "df/samsung-ko-sukisu"
     private const val NEXT_MODULE_VERSION = "3.4.2"
     private val KMIS = listOf(
         "android12-5.10", "android13-5.10", "android13-5.15", "android14-5.15",
@@ -277,7 +286,23 @@ object DfKsudUpdater {
         classic: Boolean = false,
         onLog: (String) -> Unit,
         onProgress: (Int, String) -> Unit = { _, _ -> },
+    ): String = run(
+        context = context,
+        flavor = if (classic) Flavor.CLASSIC else Flavor.NEXT,
+        onLog = onLog,
+        onProgress = onProgress,
+    )
+
+    fun run(
+        context: Context,
+        flavor: Flavor,
+        onLog: (String) -> Unit,
+        onProgress: (Int, String) -> Unit = { _, _ -> },
     ): String {
+        if (flavor == Flavor.SUKISU_NOVA) {
+            return runSukisuNova(context, onLog, onProgress)
+        }
+        val classic = flavor == Flavor.CLASSIC
         log = onLog
         val progress: (Int, String) -> Unit = { pct, stage -> onProgress(pct, stage) }
         val flavorName = if (classic) "KernelSU classic" else "KernelSU Next"
@@ -330,6 +355,224 @@ object DfKsudUpdater {
             progress(100, "Done")
             "OK: $tag patched -> profile '$profileId'"
         }
+    }
+
+    /**
+     * SukiSU-Nova updater — same profile & byte-equality flow as KernelSU Next:
+     * 1. Checks Hazystrider/UmamiRoot releases for a pre-built Samsung KDP/RKP/DEFEX ksud.
+     * 2. Falls back to upstream SukiSU-Nova/SukiSU-Nova releases (and patches in-place
+     *    if Samsung KDP .ko modules are bundled in assets/df/samsung-ko-sukisu/).
+     * 3. Verifies ELF + embedded kernelsu.ko streams, checks byte-equality for
+     *    "you are already updated", and registers into ReSukisuNovaProfiles.
+     */
+    private fun runSukisuNova(
+        context: Context,
+        onLog: (String) -> Unit,
+        onProgress: (Int, String) -> Unit,
+    ): String {
+        log = onLog
+        val progress: (Int, String) -> Unit = { pct, stage -> onProgress(pct, stage) }
+        progress(5, "Looking for the latest SukiSU-Nova release…")
+        say("[*] Looking for the latest SukiSU-Nova KDP release…")
+
+        var chosenRepo = ""
+        var chosenTag = ""
+        var chosenAssetName = ""
+        var chosenUrl = ""
+        var isKdpRelease = false
+
+        // 1. Primary: Hazystrider/UmamiRoot Samsung KDP/RKP/DEFEX releases.
+        for (repo in REPOS_SUKISU_KDP) {
+            val found = runCatching {
+                val json = String(httpGet("https://api.github.com/repos/$repo/releases?per_page=10"))
+                selectSukisuReleaseAsset(json, preferKdpOnly = true)
+            }.getOrNull()
+            if (found != null) {
+                chosenRepo = repo
+                chosenTag = found.first
+                chosenAssetName = found.second
+                chosenUrl = found.third
+                isKdpRelease = true
+                break
+            }
+        }
+
+        // 2. Fallback: upstream SukiSU-Nova/SukiSU-Nova releases.
+        if (chosenUrl.isEmpty()) {
+            say("[*] No SukiSU-Nova KDP release found on ${REPOS_SUKISU_KDP.first()}, checking upstream…")
+            for (repo in REPOS_SUKISU_UPSTREAM) {
+                val found = runCatching {
+                    val json = String(httpGet("https://api.github.com/repos/$repo/releases?per_page=10"))
+                    selectSukisuReleaseAsset(json, preferKdpOnly = false)
+                }.getOrNull()
+                if (found != null) {
+                    chosenRepo = repo
+                    chosenTag = found.first
+                    chosenAssetName = found.second
+                    chosenUrl = found.third
+                    isKdpRelease = chosenAssetName.lowercase().let { it.contains("kdp") || it.contains("samsung") }
+                    break
+                }
+            }
+        }
+
+        if (chosenUrl.isEmpty()) {
+            throw IllegalStateException("No SukiSU-Nova arm64 ksud release found on GitHub")
+        }
+
+        say("[*] Latest SukiSU-Nova release: $chosenTag ($chosenRepo -> $chosenAssetName)")
+        progress(25, "Downloading $chosenAssetName…")
+        say("[*] Downloading $chosenAssetName…")
+        val downloaded = downloadSukisuAsset(chosenUrl, chosenAssetName)
+        say("    ${downloaded.size} bytes")
+
+        check(
+            downloaded.size > 100_000 &&
+                downloaded[0] == 0x7f.toByte() &&
+                downloaded[1] == 'E'.code.toByte() &&
+                downloaded[2] == 'L'.code.toByte() &&
+                downloaded[3] == 'F'.code.toByte(),
+        ) { "Downloaded SukiSU-Nova ksud is not a valid ELF binary" }
+
+        // If this is an upstream binary AND Samsung KDP .ko modules are bundled
+        // in assets/df/samsung-ko-sukisu/, patch it on-device just like Classic/Next.
+        val bundledKdpKos = runCatching {
+            context.assets.list(KO_ASSET_DIR_SUKISU)?.filter { it.endsWith(".ko") } ?: emptyList()
+        }.getOrDefault(emptyList())
+
+        val finalBytes = if (!isKdpRelease && bundledKdpKos.size >= KMIS.size) {
+            say("[*] Patching upstream SukiSU-Nova ksud with bundled Samsung KDP+DEFEX modules…")
+            val refBase = "https://github.com/$chosenRepo/releases/download/$chosenTag"
+            progress(40, "Downloading reference kos…")
+            val refHashes = HashMap<String, String>()
+            for (kmi in KMIS) {
+                val bytes = runCatching { httpGet("$refBase/lkm-aarch64-${kmi}_kernelsu.ko") }
+                    .recoverCatching { httpGet("$refBase/aarch64_${kmi}_kernelsu.ko") }
+                    .recoverCatching { httpGet("$refBase/${kmi}_kernelsu.ko") }
+                    .getOrNull()
+                if (bytes != null) refHashes[sha256Hex(bytes)] = kmi
+            }
+            val replacements = HashMap<String, ByteArray>()
+            for (kmi in KMIS) {
+                val name = bundledKdpKos.firstOrNull { it.contains("${kmi}_kernelsu") }
+                    ?: throw IllegalStateException("Samsung SukiSU ko missing: $kmi")
+                replacements[kmi] = context.assets.open("$KO_ASSET_DIR_SUKISU/$name").use { it.readBytes() }
+            }
+            isKdpRelease = true
+            patchAssets(downloaded, replacements, refHashes, progress, requireAllModules = false)
+        } else {
+            progress(70, "Verifying embedded kernel modules…")
+            val streams = scanStreams(downloaded).toMutableList()
+            classify(streams, emptyMap())
+            val koStreams = streams.filter { it.kind == "ko" }
+            val kdpCount = koStreams.count {
+                containsBytes(it.payload, "ksu_samsung_kdp_init".toByteArray()) ||
+                    containsBytes(it.payload, "ksu_samsung_defex_init".toByteArray())
+            }
+            say("[*] Verified ELF: ${streams.size} embedded assets, ${koStreams.size} kernelsu.ko modules ($kdpCount Samsung KDP/DEFEX)")
+            if (kdpCount > 0) isKdpRelease = true
+            downloaded
+        }
+
+        val profileId = sukisuProfileId(chosenTag, isKdpRelease)
+        val existingFile = File(ReSukisuNovaProfiles.dynamicDir(context), profileId)
+        if (profileMatches(existingFile, finalBytes)) {
+            ReSukisuNovaProfiles.setSelected(context, profileId)
+            progress(100, "you are already updated")
+            say("you are already updated")
+            say("    ($chosenTag is already saved: profile '$profileId')")
+            return "you are already updated ($chosenTag)"
+        }
+
+        val note = if (isKdpRelease) {
+            "SukiSU-Nova Samsung KDP/RKP/DEFEX ($chosenTag) · $chosenRepo"
+        } else {
+            "SukiSU-Nova $chosenTag (upstream) · $chosenRepo"
+        }
+        ReSukisuNovaProfiles.addDynamic(context, profileId, finalBytes, note)
+        say("[+] SukiSU-Nova profile '$profileId' saved and SELECTED")
+        progress(100, "Done")
+        return "OK: $chosenTag -> SukiSU-Nova profile '$profileId'"
+    }
+
+    private fun downloadSukisuAsset(url: String, assetName: String): ByteArray {
+        val raw = httpGet(url)
+        if (!assetName.lowercase().endsWith(".zip")) return raw
+        java.util.zip.ZipInputStream(raw.inputStream()).use { zis ->
+            while (true) {
+                val entry = zis.nextEntry ?: break
+                val e = entry.name.lowercase()
+                if (!entry.isDirectory && !e.contains("x86") &&
+                    (e.endsWith("/ksud") || e == "ksud" || e.endsWith("ksud-aarch64-linux-android") ||
+                        e.endsWith("ksud-aarch64-linux-android.bin"))
+                ) {
+                    return zis.readBytes()
+                }
+            }
+        }
+        throw IllegalStateException("Archive $assetName does not contain an arm64 ksud binary")
+    }
+
+    /** Profile ID used for downloaded SukiSU-Nova builds. */
+    internal fun sukisuProfileId(tag: String, kdpTagged: Boolean): String {
+        val clean = tag.trim()
+        if (clean.startsWith("sukisu-kdp-")) return clean
+        val ver = clean.removePrefix("v")
+        return if (kdpTagged) "$ver-kdp-samsung" else "$ver-sukisu-nova"
+    }
+
+    internal fun selectSukisuAssetFromReleases(
+        releases: List<Pair<String, List<Triple<String, String, Long>>>>,
+        preferKdpOnly: Boolean,
+    ): Triple<String, String, String>? {
+        for ((tag, assets) in releases) {
+            if (tag.isBlank()) continue
+            val candidates = assets.filter { (name, url, _) ->
+                if (name.isBlank() || url.isBlank()) return@filter false
+                val lower = name.lowercase()
+                if (lower.endsWith(".apk") || lower.endsWith(".ko") || lower.endsWith(".sha256")) return@filter false
+                if (preferKdpOnly && !lower.contains("kdp") && !lower.contains("samsung") && !tag.lowercase().contains("kdp")) {
+                    return@filter false
+                }
+                true
+            }
+            val best = ManagerReleaseFetcher.selectBestKsudAsset(candidates)
+            if (best != null && best.kind != ManagerReleaseFetcher.AssetKind.APK_EMBEDDED_KSUD) {
+                return Triple(tag, best.name, best.downloadUrl)
+            }
+        }
+        return null
+    }
+
+    /**
+     * Scans a GitHub `/releases` JSON array and picks the newest release containing
+     * an arm64 `ksud` asset (prioritizing Samsung KDP-tagged assets).
+     * Returns (tag, assetName, downloadUrl) or null if none found.
+     */
+    internal fun selectSukisuReleaseAsset(
+        releasesJson: String,
+        preferKdpOnly: Boolean,
+    ): Triple<String, String, String>? {
+        val arr = org.json.JSONArray(releasesJson)
+        val parsed = ArrayList<Pair<String, List<Triple<String, String, Long>>>>()
+        for (i in 0 until arr.length()) {
+            val rel = arr.optJSONObject(i) ?: continue
+            val tag = rel.optString("tag_name", "").trim()
+            val assetsArr = rel.optJSONArray("assets") ?: continue
+            val assets = ArrayList<Triple<String, String, Long>>()
+            for (j in 0 until assetsArr.length()) {
+                val a = assetsArr.optJSONObject(j) ?: continue
+                assets.add(
+                    Triple(
+                        a.optString("name", ""),
+                        a.optString("browser_download_url", ""),
+                        a.optLong("size", -1L),
+                    ),
+                )
+            }
+            parsed.add(tag to assets)
+        }
+        return selectSukisuAssetFromReleases(parsed, preferKdpOnly)
     }
 
     /** Profile ID used for downloaded KernelSU Next builds (e.g. 3.4.2-kdp-samsung -> "3.4.2 · kdp-samsung"). */
