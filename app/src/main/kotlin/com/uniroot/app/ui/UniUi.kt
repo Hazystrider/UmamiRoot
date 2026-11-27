@@ -593,11 +593,11 @@ private fun UniAboutDialog(
                     modifier = Modifier
                         .size(45.dp)
                         .clip(RoundedCornerShape(12.dp))
-                        .background(colorResource(R.color.launcher_icon_background)),
+                        .background(colorResource(R.color.ic_launcher_background)),
                     contentAlignment = Alignment.Center,
                 ) {
                     Image(
-                        painter = painterResource(R.drawable.ic_launcher_foreground),
+                        painter = painterResource(R.mipmap.ic_launcher_foreground),
                         contentDescription = stringResource(R.string.app_name),
                         modifier = Modifier.requiredSize(67.dp),
                     )
