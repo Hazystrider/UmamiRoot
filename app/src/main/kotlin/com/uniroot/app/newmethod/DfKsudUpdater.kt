@@ -363,7 +363,7 @@ object DfKsudUpdater {
      * 2. Falls back to upstream SukiSU-Nova/SukiSU-Nova releases (and patches in-place
      *    if Samsung KDP .ko modules are bundled in assets/df/samsung-ko-sukisu/).
      * 3. Verifies ELF + embedded kernelsu.ko streams, checks byte-equality for
-     *    "you are already updated", and registers into ReSukisuNovaProfiles.
+     *    "you are already updated", and registers into SukisuNovaProfiles.
      */
     private fun runSukisuNova(
         context: Context,
@@ -475,9 +475,9 @@ object DfKsudUpdater {
         }
 
         val profileId = sukisuProfileId(chosenTag, isKdpRelease)
-        val existingFile = File(ReSukisuNovaProfiles.dynamicDir(context), profileId)
+        val existingFile = File(SukisuNovaProfiles.dynamicDir(context), profileId)
         if (profileMatches(existingFile, finalBytes)) {
-            ReSukisuNovaProfiles.setSelected(context, profileId)
+            SukisuNovaProfiles.setSelected(context, profileId)
             progress(100, "you are already updated")
             say("you are already updated")
             say("    ($chosenTag is already saved: profile '$profileId')")
@@ -489,7 +489,7 @@ object DfKsudUpdater {
         } else {
             "SukiSU-Nova $chosenTag (upstream) · $chosenRepo"
         }
-        ReSukisuNovaProfiles.addDynamic(context, profileId, finalBytes, note)
+        SukisuNovaProfiles.addDynamic(context, profileId, finalBytes, note)
         say("[+] SukiSU-Nova profile '$profileId' saved and SELECTED")
         progress(100, "Done")
         return "OK: $chosenTag -> SukiSU-Nova profile '$profileId'"

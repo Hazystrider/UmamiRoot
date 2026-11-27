@@ -10,7 +10,7 @@ import java.io.File
  *  1. EMBEDDED — assets/df/ksud-sukisu/<id> (+ optional <id>.txt sidecar).
  *  2. DYNAMIC  — filesDir/ksud-sukisu/<id>: downloaded/patched by DfKsudUpdater.
  */
-object ReSukisuNovaProfiles {
+object SukisuNovaProfiles {
 
     internal data class ParsedProfileId(
         val version: String,

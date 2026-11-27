@@ -121,8 +121,8 @@ class MainActivity : ComponentActivity(), Shizuku.OnRequestPermissionResultListe
         ksudNextProfileId = KsudNextProfiles.selected(this)?.id ?: ""
         ksudClassicProfiles = KsudClassicProfiles.list(this)
         ksudClassicProfileId = KsudClassicProfiles.selected(this)?.id ?: ""
-        ksudSukisuProfiles = com.uniroot.app.newmethod.ReSukisuNovaProfiles.list(this)
-        ksudSukisuProfileId = com.uniroot.app.newmethod.ReSukisuNovaProfiles.selected(this)?.id ?: ""
+        ksudSukisuProfiles = com.uniroot.app.newmethod.SukisuNovaProfiles.list(this)
+        ksudSukisuProfileId = com.uniroot.app.newmethod.SukisuNovaProfiles.selected(this)?.id ?: ""
         val appPrefs = getSharedPreferences("uniroot_prefs", MODE_PRIVATE)
         newMethod = if (appPrefs.contains("root_method_new")) {
             appPrefs.getBoolean("root_method_new", false)
@@ -278,8 +278,8 @@ class MainActivity : ComponentActivity(), Shizuku.OnRequestPermissionResultListe
                             engine.ksudNextProfile = ksudNextProfileId
                             ksudClassicProfiles = KsudClassicProfiles.list(this@MainActivity)
                             ksudClassicProfileId = KsudClassicProfiles.selected(this@MainActivity)?.id ?: ""
-                            ksudSukisuProfiles = com.uniroot.app.newmethod.ReSukisuNovaProfiles.list(this@MainActivity)
-                            ksudSukisuProfileId = com.uniroot.app.newmethod.ReSukisuNovaProfiles.selected(this@MainActivity)?.id ?: ""
+                            ksudSukisuProfiles = com.uniroot.app.newmethod.SukisuNovaProfiles.list(this@MainActivity)
+                            ksudSukisuProfileId = com.uniroot.app.newmethod.SukisuNovaProfiles.selected(this@MainActivity)?.id ?: ""
                             engine.ksudSukisuProfile = ksudSukisuProfileId
                             ksudUpdateRunning = false
                         }
@@ -302,10 +302,10 @@ class MainActivity : ComponentActivity(), Shizuku.OnRequestPermissionResultListe
                         }
                     }
                     override fun onDeleteKsudSukisuProfile(id: String) {
-                        if (!com.uniroot.app.newmethod.ReSukisuNovaProfiles.deleteDynamic(this@MainActivity, id)) return
+                        if (!com.uniroot.app.newmethod.SukisuNovaProfiles.deleteDynamic(this@MainActivity, id)) return
                         engine.appendLog("[KsudUpdate] SukiSU-Nova profile deleted: $id")
-                        ksudSukisuProfiles = com.uniroot.app.newmethod.ReSukisuNovaProfiles.list(this@MainActivity)
-                        ksudSukisuProfileId = com.uniroot.app.newmethod.ReSukisuNovaProfiles.selected(this@MainActivity)?.id ?: ""
+                        ksudSukisuProfiles = com.uniroot.app.newmethod.SukisuNovaProfiles.list(this@MainActivity)
+                        ksudSukisuProfileId = com.uniroot.app.newmethod.SukisuNovaProfiles.selected(this@MainActivity)?.id ?: ""
                         engine.ksudSukisuProfile = ksudSukisuProfileId
                     }
                     override fun onKsudClassicProfileChanged(id: String) {
@@ -315,7 +315,7 @@ class MainActivity : ComponentActivity(), Shizuku.OnRequestPermissionResultListe
                     }
                     override fun onKsudSukisuProfileChanged(id: String) {
                         ksudSukisuProfileId = id
-                        com.uniroot.app.newmethod.ReSukisuNovaProfiles.setSelected(this@MainActivity, id)
+                        com.uniroot.app.newmethod.SukisuNovaProfiles.setSelected(this@MainActivity, id)
                         engine.ksudSukisuProfile = id
                         val label = ksudSukisuProfiles.firstOrNull { it.id == id }?.label ?: id
                         engine.appendLog("[NewMethod] SukiSU-Nova profile: $label")

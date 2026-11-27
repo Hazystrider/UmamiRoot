@@ -212,11 +212,11 @@ class DfKsudUpdaterTest {
         assertEquals("3.0.0-kdp-samsung", DfKsudUpdater.sukisuProfileId("v3.0.0", true))
         assertEquals("3.0.0-sukisu-nova", DfKsudUpdater.sukisuProfileId("v3.0.0", false))
 
-        val parsedKdp = ReSukisuNovaProfiles.parseProfileId("sukisu-kdp-20261127-041000")
+        val parsedKdp = SukisuNovaProfiles.parseProfileId("sukisu-kdp-20261127-041000")
         assertEquals("20261127 · kdp-samsung", parsedKdp.label)
         assertEquals("kdp-samsung", parsedKdp.variant)
 
-        val parsedBundled = ReSukisuNovaProfiles.parseProfileId("3.0.0-sukisu-nova")
+        val parsedBundled = SukisuNovaProfiles.parseProfileId("3.0.0-sukisu-nova")
         assertEquals("3.0.0 · sukisu-nova", parsedBundled.label)
 
         val releases = listOf(

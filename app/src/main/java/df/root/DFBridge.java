@@ -141,7 +141,7 @@ public final class DFBridge {
             return;
         }
         if (isSukisu) {
-            java.io.File dynSukisu = com.uniroot.app.newmethod.ReSukisuNovaProfiles.selectedFile(context);
+            java.io.File dynSukisu = com.uniroot.app.newmethod.SukisuNovaProfiles.selectedFile(context);
             if (dynSukisu != null && dynSukisu.isFile()) {
                 copyFile(dynSukisu, new File(root, "ksud"));
                 reporter.report("staged DYNAMIC SukiSU-Nova ksud " + dynSukisu.getName()
@@ -150,7 +150,7 @@ public final class DFBridge {
             }
             String asset = explicitAsset != null
                     ? explicitAsset
-                    : com.uniroot.app.newmethod.ReSukisuNovaProfiles.resolveAsset(context);
+                    : com.uniroot.app.newmethod.SukisuNovaProfiles.resolveAsset(context);
             if (asset == null) asset = "df/ksud-sukisu/3.0.0-kdp-samsung";
             stageAsset(context, asset, new File(root, "ksud"), reporter);
             return;
