@@ -189,28 +189,16 @@ object ManagerReleaseFetcher {
     }
 
     private fun fetchLatestReleaseJson(repo: String): JSONObject {
-        fun hasSelectableAsset(release: JSONObject): Boolean {
-            val arr = release.optJSONArray("assets") ?: return false
-            if (arr.length() == 0) return false
-            val raw = buildList {
-                for (i in 0 until arr.length()) {
-                    val o = arr.optJSONObject(i) ?: continue
-                    add(Triple(o.optString("name", ""), o.optString("browser_download_url", ""), o.optLong("size", -1L)))
-                }
-            }
-            return selectBestKsudAsset(raw) != null
-        }
-
         val latest = runCatching {
             JSONObject(downloadText("https://api.github.com/repos/$repo/releases/latest"))
         }.getOrNull()
-        if (latest != null && hasSelectableAsset(latest)) {
+        if (latest != null && latest.optJSONArray("assets")?.length() ?: 0 > 0) {
             return latest
         }
-        val list = JSONArray(downloadText("https://api.github.com/repos/$repo/releases?per_page=10"))
+        val list = JSONArray(downloadText("https://api.github.com/repos/$repo/releases?per_page=5"))
         for (i in 0 until list.length()) {
-            val item = list.optJSONObject(i) ?: continue
-            if (hasSelectableAsset(item)) return item
+            val item = list.getJSONObject(i)
+            if ((item.optJSONArray("assets")?.length() ?: 0) > 0) return item
         }
         error("No published release assets found on $repo")
     }

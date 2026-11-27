@@ -206,47 +206,6 @@ class DfKsudUpdaterTest {
         assertEquals(8, changed)
     }
 
-    @Test
-    fun sukisuNovaProfileIdsAndReleaseSelection() {
-        assertEquals("sukisu-kdp-20261127-041000", DfKsudUpdater.sukisuProfileId("sukisu-kdp-20261127-041000", true))
-        assertEquals("3.0.0-kdp-samsung", DfKsudUpdater.sukisuProfileId("v3.0.0", true))
-        assertEquals("3.0.0-sukisu-nova", DfKsudUpdater.sukisuProfileId("v3.0.0", false))
-
-        val parsedKdp = ReSukisuNovaProfiles.parseProfileId("sukisu-kdp-20261127-041000")
-        assertEquals("20261127 · kdp-samsung", parsedKdp.label)
-        assertEquals("kdp-samsung", parsedKdp.variant)
-
-        val parsedBundled = ReSukisuNovaProfiles.parseProfileId("3.0.0-sukisu-nova")
-        assertEquals("3.0.0 · sukisu-nova", parsedBundled.label)
-
-        val releases = listOf(
-            "v6.0.0" to listOf(
-                Triple("UmamiRoot-v6.0.0.apk", "https://example.invalid/app.apk", 12_000_000L),
-            ),
-            "sukisu-kdp-20261127-041000" to listOf(
-                Triple("android15-6.6_kernelsu.ko", "https://example.invalid/ko", 600_000L),
-                Triple("ksud-sukisu-nova-samsung-kdp-aarch64", "https://example.invalid/kdp-ksud", 8_700_000L),
-            ),
-        )
-        val kdpPick = DfKsudUpdater.selectSukisuAssetFromReleases(releases, preferKdpOnly = true)
-        assertEquals(
-            Triple("sukisu-kdp-20261127-041000", "ksud-sukisu-nova-samsung-kdp-aarch64", "https://example.invalid/kdp-ksud"),
-            kdpPick,
-        )
-
-        val upstreamReleases = listOf(
-            "v3.0.0" to listOf(
-                Triple("ksud-x86_64-linux-android", "https://example.invalid/x86", 7_000_000L),
-                Triple("ksud-aarch64-linux-android", "https://example.invalid/arm64", 8_500_000L),
-            ),
-        )
-        val upstreamPick = DfKsudUpdater.selectSukisuAssetFromReleases(upstreamReleases, preferKdpOnly = false)
-        assertEquals(
-            Triple("v3.0.0", "ksud-aarch64-linux-android", "https://example.invalid/arm64"),
-            upstreamPick,
-        )
-    }
-
     private data class Embedded(
         val start: Int,
         val consumed: Int,

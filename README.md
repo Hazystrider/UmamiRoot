@@ -1,98 +1,67 @@
-# UmamiRoot
+# UniRoot
 
-<div align="center">
+**One-tap root for Samsung Galaxy devices — New exploit (DirtyFrag CVE-2026-43284, unprivileged) + Old exploit profiles, with auto-root at every boot.**
 
-<img src="./assets/banner.svg" alt="UmamiRoot - Samsung Galaxy Root Engine" width="600" />
+Made by **kuuky**.
 
-<br/>
-
-![Target](https://img.shields.io/badge/Target-Samsung%20Galaxy%20(Note%2020%20%E2%86%92%20S26)-253D6E?style=flat&labelColor=1B1D24)
-![Root Engines](https://img.shields.io/badge/Engines-DirtyFrag%20%7C%20Profile%20Pipeline-2B5AC2?style=flat&labelColor=1B1D24)
-![Kernels](https://img.shields.io/badge/Kernels-KSU%203.4.0%20%7C%20KSU--Next%20%7C%20SukiSU--Nova-176E4A?style=flat&labelColor=1B1D24)
-
-[![Latest Release](https://img.shields.io/github/v/release/Hazystrider/UmamiRoot?label=Latest%20Release&logo=git&logoColor=white&color=176E4A&labelColor=1B1D24&style=flat)](https://github.com/Hazystrider/UmamiRoot/releases/latest)
-[![Total Commits](https://img.shields.io/github/commit-activity/t/Hazystrider/UmamiRoot?label=Total%20Commits&logo=git&logoColor=white&color=176E4A&labelColor=1B1D24&style=flat)](https://github.com/Hazystrider/UmamiRoot/commits)
-[![Last Commit](https://img.shields.io/github/last-commit/Hazystrider/UmamiRoot?label=Last%20Commit&logo=git&logoColor=white&color=176E4A&labelColor=1B1D24&style=flat)](https://github.com/Hazystrider/UmamiRoot/commits)
-[![Debug APK CI](https://img.shields.io/github/actions/workflow/status/Hazystrider/UmamiRoot/debug-apk.yml?label=Debug%20APK&logo=githubactions&logoColor=white&color=176E4A&labelColor=1B1D24&style=flat)](https://github.com/Hazystrider/UmamiRoot/actions/workflows/debug-apk.yml)
-
-<p><b>One-tap root for Samsung Galaxy devices — New exploit (DirtyFrag CVE-2026-43284, unprivileged) + Old exploit profiles, with auto-root at every boot.</b></p>
-
-<p>Made by <b>Hazystrider</b> · <b>I am not responsible for bricked phones.</b></p>
-
-</div>
+<p align="center"><b>I am not responsible for bricked phones.</b></p>
 
 ---
 
-## About
+## What's new in V5
 
-**UmamiRoot** (`v6.0.0`) is my fork of **UniRoot** for Samsung Galaxy devices, built around the Knox `0x0`-safe DirtyFrag late-load engine with **KernelSU 3.4.0+** alignment and **SukiSU-Nova** Samsung KDP/RKP/DEFEX support wired in alongside KernelSU Classic and KernelSU-Next.
+- **New exploit (fast)** — the unprivileged DirtyFrag engine (CVE-2026-43284): IpSecManager allocates the SA, the native engine corrupts the kernel page cache, ksud is late-loaded from memory. No profile, no Shizuku, no setup — press **Root now**.
+- **ksud updater, in the app** — a full-width button (New exploit section) downloads the **latest official ksud** (KernelSU Next *or* classic, per the selected flavor) and patches it **on device** with the bundled **Samsung KDP+DEFEX .kos**, then the result is used immediately (Next → auto-selected profile, classic → `ksud-classic-latest`). Already updated? → *"you are already updated"*.
+- **ksud profiles** — profile bands (same style as the old exploit profiles) for both flavors: bundled + downloaded profiles, selectable, and deletable from **Advanced settings**.
+- **Auto-root at boot** — a foreground boot service waits for the first unlock and re-runs the chain (up to 6 attempts), with a partial WakeLock so the phone can't sleep mid-exploit.
+- **Progress UI** — animated progress bar with live engine stages (IpSec SA → SPI → ksud staged → arming → **Phone rooted ✓**), and a bottom progress popup for the ksud updater. Fully in English.
+- **Root state banner** — clean Rooted / Not rooted banner driven by a live `su -c id` probe (no more false "rooted" after a reboot).
 
----
+## KernelSU Next update compatibility
 
-## What's New in V6
+This build includes Samsung KDP/DEFEX/RKP modules from GhostSam v0.2.4,
+based on KernelSU Next **3.4.2 / 33355 / UAPI 5**. Their pinned source commits
+and SHA-256 hashes are recorded in
+[`SOURCE.json`](app/src/main/assets/df/samsung-ko/SOURCE.json).
+The updater accepts a Next release only when it matches these modules, and
+compares saved profile bytes so an older module bundle under the same release
+name is replaced. Use the matching 3.4.2 manager. After updating the profile,
+reboot and re-root to replace a kernel module already loaded in memory.
 
-- **New exploit (fast)** aligned to **KernelSU 3.4.0** with the help of **shedowe19**. Everything from V5 stays intact (in-app `ksud` updater, profile selector, auto-root at boot, live progress UI, and root state banner).
-- **SukiSU-Nova first-class support** with its own flavor tab, bundled profile, and one-tap updater wired into the same flow as KernelSU and KernelSU-Next (pulls Samsung KDP/RKP/DEFEX builds from this repo's releases, with upstream fallback).
-- **Rewired device identification** extended back out to the **Galaxy Note 20**. The app now clearly tells you whether your device is eligible and which exploit method it works with.
-- **Soft-reboot root state fix** so the app holds onto root status across soft reboots even when it doesn't have direct `su` permissions granted.
-
----
-
-## Old Exploit (Slow)
+## Old exploit (slow)
 
 The classic profile pipeline stays untouched: CVE-2026-43499 payloads (local or Shizuku), Root My Galaxy integration, per-device validated profiles (S25 ZZHL/ZZI4, S26 Ultra ZZHK, S93XX, Oppo), profile editor, instant root, and run-log archives.
 
----
-
-## KernelSU & SukiSU-Nova Compatibility
-
-This build includes Samsung KDP/DEFEX/RKP modules from **GhostSam v0.2.4** (KernelSU-Next **3.4.2 / 33355 / UAPI 5**, pinned in [`SOURCE.json`](./app/src/main/assets/df/samsung-ko/SOURCE.json)) alongside **SukiSU-Nova** Samsung KDP/RKP/DEFEX support.
-
-- The Next updater checks that the release matches the bundled modules and compares saved profile bytes so older bundles under the same tag get replaced cleanly.
-- Use a matching **3.4.x** manager (or the **SukiSU-Nova** manager when running SukiSU-Nova).
-- After updating a profile, reboot and re-root to replace a kernel module that's already loaded in memory.
-
----
-
-## Build & CI
+## Build
 
 ```sh
-./gradlew assembleRelease                  # -> app/build/outputs/apk/release/
-./gradlew testDebugUnitTest assembleDebug  # -> unit tests + debug APK
+./gradlew assembleRelease   # -> app/build/outputs/apk/release/
 ```
 
-Set `KSUD_TEST_FIXTURE` to the SHA-256-verified official `ksud` v3.4.2 binary to also run the real-binary regression test locally.
+For a debuggable test build, run `./gradlew testDebugUnitTest assembleDebug`.
+Set `KSUD_TEST_FIXTURE` to the SHA-256-verified official ksud v3.4.2 binary to
+also run the real-binary regression test. The **Debug APK** GitHub Actions
+workflow runs all nine tests with that fixture and uploads a downloadable APK
+for each successful run. Open its run summary for the download and SHA-256.
+Artifacts require GitHub sign-in and are retained for 90 days. CI uses a
+temporary debug signing key, so its APK cannot update an installation signed
+with another key.
 
-- **[Debug APK](.github/workflows/debug-apk.yml):** Runs all unit tests with the verified `ksud` fixture and uploads a downloadable debug APK + SHA-256 in the run summary (requires GitHub sign-in, retained 90 days; signed with a temporary debug key so it can't update an APK signed with another key).
-- **[Build SukiSU-Nova Samsung KDP](.github/workflows/build-sukisu-nova-kdp.yml):** Applies [`patches/sukisu-nova-samsung-kdp-rkp-defex.patch`](./patches/sukisu-nova-samsung-kdp-rkp-defex.patch) and compiles `kernelsu.ko` + `ksud` across Android 12–17 KMI targets.
-
----
+Review build for [PR #35](https://github.com/kuuky29/UniRoot/pull/35):
+[download the Debug APK](https://github.com/shedowe19/UniRoot/actions/runs/41330874318/artifacts/13093696209) from the
+[successful test/build run](https://github.com/shedowe19/UniRoot/actions/runs/41330874318)
+at commit `20dafbac040c865d70c6f837afd703fef0f12e49`.
+APK SHA-256: `971c7b6bb5a15640e077b77eeaceee6c47fdb43267e2641320e45c18e005e9ed`.
 
 ## Credits
 
 This app stands on the shoulders of:
 
-- **kuuky29** — [UniRoot](https://github.com/kuuky29/UniRoot): Upstream base, credited for the Knox-safe temporary DirtyFrag LKM loader and `ksud` bundling.
-- **SukiSU-Nova** — Upstream kernel/LKM target (SukiSU-Ultra / SukiSU-Nova), credited for the late-load `kernelsu.ko` / `ksuinit` KDP module and SUSFS integration.
-- **shedowe19** — KernelSU 3.4.0 alignment, regression test fixtures, and DirtyFrag PR work.
-- **diabl0w** — [DFRoot](https://github.com/diabl0w/DFRoot): The DirtyFrag engine this whole project is built around.
-- **snothin** — [GhostSam](https://github.com/snothin/GhostSam): The Samsung-patched `.ko`s, `ksud` patching approach, and staged native API.
-- **polygraphene** — The DFRoot fork lineage and DEFEX bypass work.
-- **tiann** — [KernelSU](https://github.com/tiann/KernelSU).
-- **rifsxd & the KernelSU-Next team** — [KernelSU-Next](https://github.com/KernelSU-Next/KernelSU-Next).
-- **YuKongA** — [GhostLock](https://github.com/YuKongA/GhostLock): The UI this app's interface is based on.
+- **diabl0w** — [DFRoot](https://github.com/diabl0w/DFRoot): the DirtyFrag engine this whole project is built around
+- **snothin** — [GhostSam](https://github.com/snothin/GhostSam): the Samsung-patched kos, the ksud patching approach and the staged native API
+- **polygraphene** — the DFRoot fork lineage and the DEFEX bypass work
+- **tiann** — [KernelSU](https://github.com/tiann/KernelSU)
+- **rifsxd & the KernelSU-Next team** — [KernelSU-Next](https://github.com/KernelSU-Next/KernelSU-Next)
+- **YuKongA** — [GhostLock](https://github.com/YuKongA/GhostLock): the UI this app's interface is based on
 
-Thanks!
-
----
-
-## Disclaimer & User Responsibility
-
-UmamiRoot runs kernel-level exploits and loads kernel modules (`kernelsu.ko`) at runtime on Samsung Galaxy devices.
-
-- **Use at your own risk.** I am **not responsible** for bricked phones, bootloops, data loss, tripped Knox/warranty flags, broken updates, or Play Integrity failures.
-- Keep backups before messing with root or kernel modules.
-
-## AI Assistance Disclosure
-
-Portions of UmamiRoot's Kotlin/Java glue, SukiSU-Nova integration, UI theming, CI workflows, and documentation were drafted or refined with the help of AI coding tools, then reviewed and tested by me on-device. Because this app loads kernel modules and interacts with privileged root components, feel free to inspect the source and CI build scripts directly before installing.
+Thank you all 🙏

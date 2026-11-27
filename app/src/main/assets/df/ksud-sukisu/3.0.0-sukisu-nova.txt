@@ -1,1 +1,0 @@
-Bundled SukiSU-Nova ksud (GKI 5.10-6.18 LKMs) — tap Update to fetch latest Samsung KDP build

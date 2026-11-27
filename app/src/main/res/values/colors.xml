@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="bg">#FFF6F8FC</color>
-    <color name="text_primary">#FF181C24</color>
-    <color name="text_secondary">#FF454C5E</color>
-    <color name="accent">#FF176E4A</color>
-    <color name="launcher_icon_background">#FF1F2024</color>
+    <color name="bg">#FFF7F8FA</color>
+    <color name="text_primary">#FF111827</color>
+    <color name="text_secondary">#FF6B7280</color>
+    <color name="accent">#FF2563EB</color>
+    <color name="launcher_icon_background">#FFF1F3F5</color>
 </resources>
