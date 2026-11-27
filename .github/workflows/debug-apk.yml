@@ -53,13 +53,13 @@ jobs:
             "$KSUD_TEST_FIXTURE" | sha256sum --check --status
 
       - name: Test and build Debug APK
-        run: ./gradlew --no-daemon --max-workers=2 testDebugUnitTest assembleDebug
+        run: bash ./gradlew --no-daemon --max-workers=2 testDebugUnitTest assembleDebug
 
       - name: Verify and prepare APK
         id: package
         shell: bash
         run: |
-          apk="$RUNNER_TEMP/UniRoot-debug-$GITHUB_SHA.apk"
+          apk="$RUNNER_TEMP/UmamiRoot-debug-$GITHUB_SHA.apk"
           cp app/build/outputs/apk/debug/app-debug.apk "$apk"
           "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify "$apk"
           badging="$("$ANDROID_HOME/build-tools/36.0.0/aapt" dump badging "$apk")"
