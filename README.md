@@ -25,7 +25,7 @@
 
 ## About
 
-**UmamiRoot** (`v6.2.0`) is my fork of **UniRoot** for Samsung Galaxy devices, built around the Knox-safe DirtyFrag late-load engine with **KernelSU 3.4.0+** alignment, **SukiSU-Nova** Samsung KDP/RKP/DEFEX support, and **YukiSU** flavor wiring alongside KernelSU Classic and KernelSU-Next. See [CHANGELOG.md](./CHANGELOG.md) for version history.
+**UmamiRoot** (`v6.2.1`) is my fork of **UniRoot** for Samsung Galaxy devices, built around the Knox-safe DirtyFrag late-load engine with **KernelSU 3.4.0+** alignment, **SukiSU-Nova** Samsung KDP/RKP/DEFEX support, and **YukiSU** flavor wiring alongside KernelSU Classic and KernelSU-Next. See [CHANGELOG.md](./CHANGELOG.md) for version history.
 
 ---
 

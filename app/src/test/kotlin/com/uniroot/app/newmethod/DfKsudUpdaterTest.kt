@@ -291,6 +291,20 @@ class DfKsudUpdaterTest {
         )
     }
 
+    @Test
+    fun selectsBestManagerApkAsset() {
+        val pick = ManagerReleaseFetcher.selectBestManagerApkAsset(
+            listOf(
+                Triple("ksud-aarch64-linux-android", "https://example.invalid/ksud", 6_000_000L),
+                Triple("YukiSU_v1.9.0-debug.apk", "https://example.invalid/debug", 12_000_000L),
+                Triple("YukiSU_v1.9.0-x86_64-release.apk", "https://example.invalid/x86", 12_000_000L),
+                Triple("YukiSU_v1.9.0_10700-arm64-v8a-release.apk", "https://example.invalid/arm64", 13_200_000L),
+                Triple("YukiSU_v1.9.0_10700-arm64-v8a-release.apk.asc", "https://example.invalid/asc", 134L),
+            ),
+        )
+        assertEquals("YukiSU_v1.9.0_10700-arm64-v8a-release.apk", pick?.name)
+    }
+
     private data class Embedded(
         val start: Int,
         val consumed: Int,

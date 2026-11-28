@@ -1517,6 +1517,26 @@ private fun KernelManagerCard(
                         )
                     }
                 }
+                if (selected.githubRepos.isNotEmpty()) {
+                    if (state.managerFetchStatus.isNotBlank()) {
+                        Text(
+                            text = state.managerFetchStatus,
+                            fontSize = 11.sp,
+                            color = MiuixTheme.colorScheme.onSurface.copy(alpha = 0.72f),
+                        )
+                    }
+                    TextButton(
+                        text = if (state.managerFetchRunning) {
+                            "Downloading ${selected.displayName} APK…"
+                        } else {
+                            "Download ${selected.displayName} APK"
+                        },
+                        enabled = !state.managerFetchRunning,
+                        colors = ButtonDefaults.textButtonColorsPrimary(),
+                        onClick = actions::onFetchManagerKsud,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
                 if (state.newMethod) {
                     val activeKdpLabel = when (state.ksuFlavor) {
                         "kernelsu_next" -> {
@@ -1547,26 +1567,6 @@ private fun KernelManagerCard(
                         color = MiuixTheme.colorScheme.primary,
                     )
                     if (selected.prefersCustomKsud || state.customKsudStatus.isNotBlank()) {
-                        if (state.managerFetchStatus.isNotBlank()) {
-                            Text(
-                                text = state.managerFetchStatus,
-                                fontSize = 11.sp,
-                                color = MiuixTheme.colorScheme.onSurface.copy(alpha = 0.72f),
-                            )
-                        }
-                        if (selected.githubRepos.isNotEmpty()) {
-                            TextButton(
-                                text = if (state.managerFetchRunning) {
-                                    "Fetching ${selected.displayName} ksud…"
-                                } else {
-                                    "Fetch ${selected.displayName} ksud from GitHub"
-                                },
-                                enabled = !state.managerFetchRunning,
-                                colors = ButtonDefaults.textButtonColorsPrimary(),
-                                onClick = actions::onFetchManagerKsud,
-                                modifier = Modifier.fillMaxWidth(),
-                            )
-                        }
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(8.dp),

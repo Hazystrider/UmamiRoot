@@ -3,6 +3,14 @@
 All notable changes to **UmamiRoot** are documented in this file.
 Versioning follows [Semantic Versioning](https://semver.org/) (`MAJOR.MINOR.PATCH`).
 
+## [6.2.1] - 2026-11-28
+
+### Fixed
+- Restored the proven single-load `libexp.so` / `libexpnext.so` native loader in `DFBridge.load` while keeping 4-flavor `ksud` staging and one-tap `DfKsudUpdater` fetching intact.
+
+### Changed
+- Switched the button inside **Kernel manager** (`KernelManagerCard`) from a duplicate `ksud` fetch to **Download `<Manager>` APK** (`ManagerReleaseFetcher.fetchLatestManagerApk`), downloading the official arm64/universal release APK from GitHub and launching the Android installer via `FileProvider`.
+
 ## [6.2.0] - 2026-11-28
 
 ### Added

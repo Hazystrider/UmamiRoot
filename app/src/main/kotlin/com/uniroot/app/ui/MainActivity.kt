@@ -504,48 +504,53 @@ class MainActivity : ComponentActivity(), Shizuku.OnRequestPermissionResultListe
                     override fun onFetchManagerKsud() {
                         if (managerFetchRunning) return
                         val mgr = engine.selectedKernelManager()
-                        if (mgr == com.uniroot.app.engine.KernelManagerType.SUKISU_NOVA) {
-                            if (ksuFlavor != "sukisu_nova") onKsuFlavorSelected("sukisu_nova")
-                            onUpdateKsud()
-                            return
-                        }
-                        if (mgr == com.uniroot.app.engine.KernelManagerType.YUKISU) {
-                            if (ksuFlavor != "yukisu") onKsuFlavorSelected("yukisu")
-                            onUpdateKsud()
-                            return
-                        }
                         if (mgr.githubRepos.isEmpty()) {
                             Toast.makeText(this@MainActivity, "No GitHub repo for ${mgr.displayName}", Toast.LENGTH_SHORT).show()
                             return
                         }
                         managerFetchRunning = true
-                        managerFetchStatus = "Checking ${mgr.githubRepos.first()}…"
+                        managerFetchStatus = "Checking ${mgr.displayName} APK releases…"
                         lifecycleScope.launch {
                             val res = runCatching {
                                 withContext(Dispatchers.IO) {
-                                    com.uniroot.app.newmethod.ManagerReleaseFetcher.fetchLatest(
+                                    com.uniroot.app.newmethod.ManagerReleaseFetcher.fetchLatestManagerApk(
                                         context = this@MainActivity,
                                         manager = mgr,
-                                        destFile = engine.customKsudFile(ksuFlavor),
                                         log = { line ->
-                                            engine.appendLog("[ManagerFetch] $line")
+                                            engine.appendLog("[ManagerApk] $line")
                                             runOnUiThread { managerFetchStatus = line }
                                         },
                                     )
                                 }
                             }
                             managerFetchRunning = false
-                            refreshKernelManagerState()
                             res.onSuccess { r ->
-                                val kdpNote = if (r.kdpTagged) "KDP-tagged" else "upstream (non-KDP)"
-                                val msg = "Fetched ${r.repo} ${r.tag} (${r.assetName}, $kdpNote)"
+                                val msg = "Downloaded ${r.assetName} (${r.tag}) — opening installer"
                                 managerFetchStatus = msg
-                                engine.appendLog("[ManagerFetch] $msg")
+                                engine.appendLog("[ManagerApk] $msg")
                                 Toast.makeText(this@MainActivity, msg, Toast.LENGTH_LONG).show()
+                                runCatching {
+                                    val uri = androidx.core.content.FileProvider.getUriForFile(
+                                        this@MainActivity,
+                                        "$packageName.fileprovider",
+                                        r.apkFile,
+                                    )
+                                    val installIntent = android.content.Intent(android.content.Intent.ACTION_VIEW).apply {
+                                        setDataAndType(uri, "application/vnd.android.package-archive")
+                                        addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                        addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                                    }
+                                    startActivity(installIntent)
+                                }.onFailure { err ->
+                                    val errMsg = "Could not open installer: ${err.message}"
+                                    managerFetchStatus = errMsg
+                                    engine.appendLog("[ManagerApk] $errMsg")
+                                    Toast.makeText(this@MainActivity, errMsg, Toast.LENGTH_LONG).show()
+                                }
                             }.onFailure { e ->
-                                val msg = "Fetch failed: ${e.message}"
+                                val msg = "APK download failed: ${e.message}"
                                 managerFetchStatus = msg
-                                engine.appendLog("[ManagerFetch] $msg")
+                                engine.appendLog("[ManagerApk] $msg")
                                 Toast.makeText(this@MainActivity, msg, Toast.LENGTH_LONG).show()
                             }
                         }

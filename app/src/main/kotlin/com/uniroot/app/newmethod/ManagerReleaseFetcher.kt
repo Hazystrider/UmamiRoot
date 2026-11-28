@@ -41,6 +41,14 @@ object ManagerReleaseFetcher {
         val bytes: Long,
     )
 
+    data class ApkFetchResult(
+        val repo: String,
+        val tag: String,
+        val assetName: String,
+        val apkFile: File,
+        val bytes: Long,
+    )
+
     private const val MAX_JSON_BYTES = 512 * 1024
     private const val MAX_ASSET_BYTES = 120L * 1024L * 1024L
 
@@ -186,6 +194,133 @@ object ManagerReleaseFetcher {
             }
         }
         throw IllegalStateException(lastError?.message ?: "Could not fetch release for ${manager.displayName}", lastError)
+    }
+
+    /**
+     * Picks the best arm64/universal release `.apk` for a KernelSU manager from a
+     * GitHub release's `assets` list.
+     */
+    internal fun selectBestManagerApkAsset(assets: List<Triple<String, String, Long>>): ReleaseAsset? {
+        val candidates = assets.mapNotNull { (name, url, size) ->
+            val lower = name.lowercase()
+            if (!lower.endsWith(".apk")) return@mapNotNull null
+            if (lower.contains("x86") || lower.contains("armeabi") || lower.contains("armv7") || lower.contains("riscv")) {
+                return@mapNotNull null
+            }
+            ReleaseAsset(name, url, size, isKdpTagged = false, kind = AssetKind.APK_EMBEDDED_KSUD)
+        }
+
+        fun score(a: ReleaseAsset): Int {
+            val lower = a.name.lowercase()
+            var s = 0
+            if (!lower.contains("debug")) s += 50
+            if (lower.contains("release")) s += 15
+            if (lower.contains("arm64") || lower.contains("aarch64") || lower.contains("universal")) s += 20
+            if (lower.contains("spoof")) s -= 5
+            return s
+        }
+
+        return candidates.maxByOrNull { score(it) }
+    }
+
+    /**
+     * Downloads the latest official manager `.apk` for [manager] into
+     * `filesDir/manager/<id>-latest.apk` (exposed via FileProvider) so the user
+     * can install it directly without duplicating the `ksud` updater.
+     */
+    fun fetchLatestManagerApk(
+        context: Context,
+        manager: KernelManagerType,
+        log: (String) -> Unit,
+    ): ApkFetchResult {
+        val repos = manager.githubRepos
+        require(repos.isNotEmpty()) { "No GitHub release repo configured for ${manager.displayName}" }
+
+        val dir = File(context.filesDir, "manager").apply { mkdirs() }
+        val destFile = File(dir, "${manager.id}-latest.apk")
+
+        var lastError: Throwable? = null
+        for (repo in repos) {
+            try {
+                log("Checking manager APK releases on $repo…")
+                val release = fetchLatestApkReleaseJson(repo)
+                val tag = release.optString("tag_name", "latest")
+                val assetsArr = release.optJSONArray("assets") ?: JSONArray()
+                val rawAssets = buildList {
+                    for (i in 0 until assetsArr.length()) {
+                        val o = assetsArr.getJSONObject(i)
+                        add(
+                            Triple(
+                                o.optString("name", ""),
+                                o.optString("browser_download_url", ""),
+                                o.optLong("size", -1L),
+                            ),
+                        )
+                    }
+                }
+                val chosen = selectBestManagerApkAsset(rawAssets)
+                    ?: error("No release APK found in $repo ($tag)")
+
+                log("Downloading ${chosen.name} ($tag)…")
+                val tmp = File(dir, "${destFile.name}.dl")
+                try {
+                    downloadRaw(chosen.downloadUrl, tmp)
+                    require(tmp.length() > 200_000L) { "Downloaded APK is too small (${tmp.length()} bytes)" }
+                    val magic = ByteArray(4)
+                    tmp.inputStream().use { it.read(magic) }
+                    require(
+                        magic[0] == 'P'.code.toByte() &&
+                            magic[1] == 'K'.code.toByte() &&
+                            magic[2] == 0x03.toByte() &&
+                            magic[3] == 0x04.toByte(),
+                    ) { "Downloaded file is not a valid APK archive" }
+
+                    if (destFile.exists()) destFile.delete()
+                    require(tmp.renameTo(destFile)) { "Could not save ${destFile.name}" }
+                    destFile.setReadable(true, false)
+                    return ApkFetchResult(
+                        repo = repo,
+                        tag = tag,
+                        assetName = chosen.name,
+                        apkFile = destFile,
+                        bytes = destFile.length(),
+                    )
+                } finally {
+                    if (tmp.exists()) runCatching { tmp.delete() }
+                }
+            } catch (e: Throwable) {
+                lastError = e
+                log("Repo $repo skipped: ${e.message}")
+            }
+        }
+        throw IllegalStateException(lastError?.message ?: "Could not fetch manager APK for ${manager.displayName}", lastError)
+    }
+
+    private fun fetchLatestApkReleaseJson(repo: String): JSONObject {
+        fun hasApkAsset(release: JSONObject): Boolean {
+            val arr = release.optJSONArray("assets") ?: return false
+            if (arr.length() == 0) return false
+            val raw = buildList {
+                for (i in 0 until arr.length()) {
+                    val o = arr.optJSONObject(i) ?: continue
+                    add(Triple(o.optString("name", ""), o.optString("browser_download_url", ""), o.optLong("size", -1L)))
+                }
+            }
+            return selectBestManagerApkAsset(raw) != null
+        }
+
+        val latest = runCatching {
+            JSONObject(downloadText("https://api.github.com/repos/$repo/releases/latest"))
+        }.getOrNull()
+        if (latest != null && hasApkAsset(latest)) {
+            return latest
+        }
+        val list = JSONArray(downloadText("https://api.github.com/repos/$repo/releases?per_page=10"))
+        for (i in 0 until list.length()) {
+            val item = list.optJSONObject(i) ?: continue
+            if (hasApkAsset(item)) return item
+        }
+        error("No published manager APK found on $repo")
     }
 
     private fun fetchLatestReleaseJson(repo: String): JSONObject {

@@ -25,40 +25,19 @@ import java.security.SecureRandom;
  */
 public final class DFBridge {
 
-    private static String loadedLib = null;
+    private static boolean loaded = false;
 
     private DFBridge() {}
 
-    /** Loads the flavor-matching native library (same JNI symbol in all three). */
+    /** Loads the flavor-matching native engine (same JNI symbol in both). */
     public static synchronized void load(boolean next) {
-        load(next ? "kernelsu_next" : "kernelsu");
+        if (loaded) return;
+        System.loadLibrary(next ? "expnext" : "exp");
+        loaded = true;
     }
 
     public static synchronized void load(String flavor) {
-        String lib;
-        if ("kernelsu_next".equals(flavor)) {
-            lib = "expnext";
-        } else if ("sukisu_nova".equals(flavor)) {
-            lib = "expsukisu";
-        } else if ("yukisu".equals(flavor)) {
-            lib = "expyukisu";
-        } else {
-            lib = "exp";
-        }
-        if (lib.equals(loadedLib)) return;
-        try {
-            System.loadLibrary(lib);
-            loadedLib = lib;
-        } catch (UnsatisfiedLinkError e) {
-            if ("expyukisu".equals(lib)) {
-                if (!"exp".equals(loadedLib)) {
-                    System.loadLibrary("exp");
-                    loadedLib = "exp";
-                }
-            } else {
-                throw e;
-            }
-        }
+        load("kernelsu_next".equals(flavor));
     }
 
     public static native int nativeRunAll(IReporter reporter, int encapPort, int spi,
