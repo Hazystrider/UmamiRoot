@@ -6,7 +6,7 @@
 
 <br/>
 
-![Target](https://img.shields.io/badge/Target-Samsung%20Galaxy%20(Note%2020%20%E2%86%92%20S26)-253D6E?style=flat&labelColor=1B1D24)
+![Target](https://img.shields.io/badge/Target-Samsung%20Galaxy%20(S22%20%E2%86%92%20S26%20%C2%B7%20GKI%202.0%205.10%E2%80%936.18)-253D6E?style=flat&labelColor=1B1D24)
 ![Root Engines](https://img.shields.io/badge/Engines-DirtyFrag%20%7C%20Profile%20Pipeline-2B5AC2?style=flat&labelColor=1B1D24)
 ![Kernels](https://img.shields.io/badge/Kernels-KSU%203.4.0%20%7C%20KSU--Next%20%7C%20SukiSU--Nova-176E4A?style=flat&labelColor=1B1D24)
 
@@ -29,11 +29,27 @@
 
 ---
 
+## Supported Devices & Kernels (GKI 2.0)
+
+DirtyFrag + late-load LKM root requires **GKI 2.0 (Linux 5.10 – 6.18)**:
+
+| Samsung Galaxy Models | Kernel | KMI Targets | Status |
+| :--- | :---: | :--- | :---: |
+| **Galaxy S26 / Z Fold 8** | `6.12` / `6.18` | `android16-6.12`, `android17-6.18` | Supported |
+| **Galaxy S25 / Z Fold 7 / Z Flip 7** | `6.6` | `android15-6.6` | Supported |
+| **Galaxy S24 / Z Fold 6 / Z Flip 6** | `6.1` | `android14-6.1` | Supported |
+| **Galaxy S23 / Z Fold 5 / Z Flip 5** | `5.15` | `android13-5.15`, `android14-5.15` | Supported |
+| **Galaxy S22 / Z Fold 4 / Z Flip 4** | `5.10` | `android12-5.10`, `android13-5.10` | Supported |
+| **Galaxy S21 / Z Fold 3 / Z Flip 3** | `5.4` | Non-GKI 2.0 | Not supported (identified) |
+| **Galaxy Note 20 / S20 / Note 10 / S10** | `4.19` / `4.14` | Non-GKI 2.0 | Not supported (identified) |
+
+---
+
 ## What's New in V6
 
 - **New exploit (fast)** aligned to **KernelSU 3.4.0** with the help of **shedowe19**. Everything from V5 stays intact (in-app `ksud` updater, profile selector, auto-root at boot, live progress UI, and root state banner).
 - **SukiSU-Nova first-class support** with its own flavor tab, bundled profile, and one-tap updater wired into the same flow as KernelSU and KernelSU-Next (pulls Samsung KDP/RKP/DEFEX builds from this repo's releases, with upstream fallback).
-- **Rewired device identification** extended back out to the **Galaxy Note 20**. The app now clearly tells you whether your device is eligible and which exploit method it works with.
+- **Rewired device identification** extended back out to the **Galaxy Note 20** (and S10/Note 10). The app now clearly tells you whether your device is eligible (GKI 2.0 `5.10+`) and which exploit method it works with.
 - **Soft-reboot root state fix** so the app holds onto root status across soft reboots even when it doesn't have direct `su` permissions granted.
 
 ---
