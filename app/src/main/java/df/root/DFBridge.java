@@ -40,12 +40,25 @@ public final class DFBridge {
             lib = "expnext";
         } else if ("sukisu_nova".equals(flavor)) {
             lib = "expsukisu";
+        } else if ("yukisu".equals(flavor)) {
+            lib = "expyukisu";
         } else {
             lib = "exp";
         }
         if (lib.equals(loadedLib)) return;
-        System.loadLibrary(lib);
-        loadedLib = lib;
+        try {
+            System.loadLibrary(lib);
+            loadedLib = lib;
+        } catch (UnsatisfiedLinkError e) {
+            if ("expyukisu".equals(lib)) {
+                if (!"exp".equals(loadedLib)) {
+                    System.loadLibrary("exp");
+                    loadedLib = "exp";
+                }
+            } else {
+                throw e;
+            }
+        }
     }
 
     public static native int nativeRunAll(IReporter reporter, int encapPort, int spi,
@@ -57,7 +70,7 @@ public final class DFBridge {
         return run(context, next ? "kernelsu_next" : "kernelsu", softReboot, reporter);
     }
 
-    /** Flavor-aware privileged-free root run ("kernelsu", "kernelsu_next", "sukisu_nova"). */
+    /** Flavor-aware privileged-free root run ("kernelsu", "kernelsu_next", "sukisu_nova", "yukisu"). */
     public static int run(Context context, String flavor, boolean softReboot, IReporter reporter) {
         try {
             boolean isNext = "kernelsu_next".equals(flavor);
@@ -120,15 +133,18 @@ public final class DFBridge {
         stageKsud(context, next ? "kernelsu_next" : "kernelsu", reporter, ksudNextAsset);
     }
 
-    /** Flavor-aware staging ("kernelsu", "kernelsu_next", "sukisu_nova"). */
+    /** Flavor-aware staging ("kernelsu", "kernelsu_next", "sukisu_nova", "yukisu"). */
     public static void stageKsud(Context context, String flavor, IReporter reporter,
                                  String explicitAsset) throws IOException {
         File root = context.getFilesDir().getParentFile();
         boolean isNext = "kernelsu_next".equals(flavor);
         boolean isSukisu = "sukisu_nova".equals(flavor);
+        boolean isYukisu = "yukisu".equals(flavor);
 
         // User-patched custom ksud wins over bundled/dynamic profiles.
-        String customName = isSukisu ? "ksud-custom-sukisu" : (isNext ? "ksud-custom-next" : "ksud-custom-classic");
+        String customName = isYukisu
+                ? "ksud-custom-yukisu"
+                : (isSukisu ? "ksud-custom-sukisu" : (isNext ? "ksud-custom-next" : "ksud-custom-classic"));
         File custom = new File(root, customName);
         if (custom.isFile() && custom.length() > 100_000) {
             if (isNext) {
@@ -138,6 +154,23 @@ public final class DFBridge {
                 copyFile(custom, new File(root, "ksud"));
             }
             reporter.report("staged CUSTOM ksud (" + custom.length() + " bytes)\n");
+            return;
+        }
+        if (isYukisu) {
+            java.io.File dynYukisu = com.uniroot.app.newmethod.YukisuProfiles.selectedFile(context);
+            if (dynYukisu != null && dynYukisu.isFile()) {
+                copyFile(dynYukisu, new File(root, "ksud"));
+                reporter.report("staged DYNAMIC YukiSU ksud " + dynYukisu.getName()
+                        + " (" + dynYukisu.length() + " bytes)\n");
+                return;
+            }
+            String asset = explicitAsset != null
+                    ? explicitAsset
+                    : com.uniroot.app.newmethod.YukisuProfiles.resolveAsset(context);
+            if (asset == null) {
+                throw new IOException("No YukiSU ksud profile installed yet — tap Update ksud YukiSU first");
+            }
+            stageAsset(context, asset, new File(root, "ksud"), reporter);
             return;
         }
         if (isSukisu) {

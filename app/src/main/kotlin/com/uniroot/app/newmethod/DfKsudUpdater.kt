@@ -33,12 +33,15 @@ object DfKsudUpdater {
         CLASSIC,
         NEXT,
         SUKISU_NOVA,
+        YUKISU,
     }
 
     private val REPOS_NEXT = listOf("KernelSU-Next/KernelSU-Next", "rifsxd/KernelSU-Next")
     private val REPOS_CLASSIC = listOf("tiann/KernelSU", "KernelSU/KernelSU")
     private val REPOS_SUKISU_KDP = listOf("Hazystrider/UmamiRoot")
     private val REPOS_SUKISU_UPSTREAM = listOf("SukiSU-Nova/SukiSU-Nova")
+    private val REPOS_YUKISU_KDP = listOf("Hazystrider/UmamiRoot")
+    private val REPOS_YUKISU_UPSTREAM = listOf("Rouyashiki/YukiSU")
     private const val KO_ASSET_DIR = "df/samsung-ko"
     private const val KO_ASSET_DIR_CLASSIC = "df/samsung-ko-classic"
     private const val KO_ASSET_DIR_SUKISU = "df/samsung-ko-sukisu"
@@ -302,6 +305,9 @@ object DfKsudUpdater {
         if (flavor == Flavor.SUKISU_NOVA) {
             return runSukisuNova(context, onLog, onProgress)
         }
+        if (flavor == Flavor.YUKISU) {
+            return runYukisu(context, onLog, onProgress)
+        }
         val classic = flavor == Flavor.CLASSIC
         log = onLog
         val progress: (Int, String) -> Unit = { pct, stage -> onProgress(pct, stage) }
@@ -527,11 +533,14 @@ object DfKsudUpdater {
     ): Triple<String, String, String>? {
         for ((tag, assets) in releases) {
             if (tag.isBlank()) continue
+            val tagLower = tag.lowercase()
+            if (preferKdpOnly && tagLower.contains("yukisu")) continue
             val candidates = assets.filter { (name, url, _) ->
                 if (name.isBlank() || url.isBlank()) return@filter false
                 val lower = name.lowercase()
-                if (lower.endsWith(".apk") || lower.endsWith(".ko") || lower.endsWith(".sha256")) return@filter false
-                if (preferKdpOnly && !lower.contains("kdp") && !lower.contains("samsung") && !tag.lowercase().contains("kdp")) {
+                if (lower.endsWith(".apk") || lower.endsWith(".ko") || lower.endsWith(".sha256") || lower.endsWith(".sig")) return@filter false
+                if (preferKdpOnly && lower.contains("yukisu")) return@filter false
+                if (preferKdpOnly && !lower.contains("kdp") && !lower.contains("samsung") && !tagLower.contains("kdp")) {
                     return@filter false
                 }
                 true
@@ -553,6 +562,155 @@ object DfKsudUpdater {
         releasesJson: String,
         preferKdpOnly: Boolean,
     ): Triple<String, String, String>? {
+        return selectSukisuAssetFromReleases(parseReleasesJson(releasesJson), preferKdpOnly)
+    }
+
+    /**
+     * YukiSU updater — mirrors SukiSU-Nova:
+     * 1. Primary: Hazystrider/UmamiRoot `yukisu-kdp-*` releases (Samsung KDP/RKP/DEFEX).
+     * 2. Fallback: upstream Rouyashiki/YukiSU releases (non-KDP until KDP build is published).
+     * 3. Validates ELF, checks byte-equality for "you are already updated", and saves
+     *    into YukisuProfiles.
+     */
+    private fun runYukisu(
+        context: Context,
+        onLog: (String) -> Unit,
+        onProgress: (Int, String) -> Unit,
+    ): String {
+        log = onLog
+        val progress: (Int, String) -> Unit = { pct, stage -> onProgress(pct, stage) }
+        progress(5, "Looking for the latest YukiSU release…")
+        say("[*] Looking for the latest YukiSU KDP release…")
+
+        var chosenRepo = ""
+        var chosenTag = ""
+        var chosenAssetName = ""
+        var chosenUrl = ""
+        var isKdpRelease = false
+
+        // 1. Primary: Hazystrider/UmamiRoot YukiSU Samsung KDP releases.
+        for (repo in REPOS_YUKISU_KDP) {
+            val found = runCatching {
+                val json = String(httpGet("https://api.github.com/repos/$repo/releases?per_page=10"))
+                selectYukisuReleaseAsset(json, preferKdpOnly = true)
+            }.getOrNull()
+            if (found != null) {
+                chosenRepo = repo
+                chosenTag = found.first
+                chosenAssetName = found.second
+                chosenUrl = found.third
+                isKdpRelease = true
+                break
+            }
+        }
+
+        // 2. Fallback: upstream Rouyashiki/YukiSU releases.
+        if (chosenUrl.isEmpty()) {
+            say("[*] No YukiSU KDP release found on ${REPOS_YUKISU_KDP.first()}, checking upstream…")
+            for (repo in REPOS_YUKISU_UPSTREAM) {
+                val found = runCatching {
+                    val json = String(httpGet("https://api.github.com/repos/$repo/releases?per_page=10"))
+                    selectYukisuReleaseAsset(json, preferKdpOnly = false)
+                }.getOrNull()
+                if (found != null) {
+                    chosenRepo = repo
+                    chosenTag = found.first
+                    chosenAssetName = found.second
+                    chosenUrl = found.third
+                    isKdpRelease = chosenAssetName.lowercase().let { it.contains("kdp") || it.contains("samsung") }
+                    break
+                }
+            }
+        }
+
+        if (chosenUrl.isEmpty()) {
+            throw IllegalStateException("No YukiSU arm64 ksud release found on GitHub")
+        }
+
+        say("[*] Latest YukiSU release: $chosenTag ($chosenRepo -> $chosenAssetName)")
+        if (!isKdpRelease) {
+            say("[!] Upstream YukiSU binary does not include Samsung KDP/RKP/DEFEX patches yet.")
+        }
+        progress(30, "Downloading $chosenAssetName…")
+        say("[*] Downloading $chosenAssetName…")
+        val downloaded = downloadSukisuAsset(chosenUrl, chosenAssetName)
+        say("    ${downloaded.size} bytes")
+
+        check(
+            downloaded.size > 100_000 &&
+                downloaded[0] == 0x7f.toByte() &&
+                downloaded[1] == 'E'.code.toByte() &&
+                downloaded[2] == 'L'.code.toByte() &&
+                downloaded[3] == 'F'.code.toByte(),
+        ) { "Downloaded YukiSU ksud is not a valid ELF binary" }
+
+        progress(80, "Verifying binary…")
+        val profileId = yukisuProfileId(chosenTag, isKdpRelease)
+        val existingFile = File(YukisuProfiles.dynamicDir(context), profileId)
+        if (profileMatches(existingFile, downloaded)) {
+            YukisuProfiles.setSelected(context, profileId)
+            progress(100, "you are already updated")
+            say("you are already updated")
+            say("    ($chosenTag is already saved: profile '$profileId')")
+            return "you are already updated ($chosenTag)"
+        }
+
+        val note = if (isKdpRelease) {
+            "YukiSU Samsung KDP/RKP/DEFEX ($chosenTag) · $chosenRepo"
+        } else {
+            "YukiSU $chosenTag (upstream non-KDP) · $chosenRepo"
+        }
+        YukisuProfiles.addDynamic(context, profileId, downloaded, note)
+        say("[+] YukiSU profile '$profileId' saved and SELECTED")
+        progress(100, "Done")
+        return "OK: $chosenTag -> YukiSU profile '$profileId'"
+    }
+
+    /** Profile ID used for downloaded YukiSU builds. */
+    internal fun yukisuProfileId(tag: String, kdpTagged: Boolean): String {
+        val clean = tag.trim()
+        if (clean.startsWith("yukisu-kdp-")) return clean
+        val ver = clean.removePrefix("v")
+        return if (kdpTagged) "$ver-kdp-samsung" else "$ver-yukisu"
+    }
+
+    internal fun selectYukisuAssetFromReleases(
+        releases: List<Pair<String, List<Triple<String, String, Long>>>>,
+        preferKdpOnly: Boolean,
+    ): Triple<String, String, String>? {
+        for ((tag, assets) in releases) {
+            if (tag.isBlank()) continue
+            val tagLower = tag.lowercase()
+            if (preferKdpOnly && !tagLower.contains("yukisu") && assets.none { it.first.lowercase().contains("yukisu") }) {
+                continue
+            }
+            val candidates = assets.filter { (name, url, _) ->
+                if (name.isBlank() || url.isBlank()) return@filter false
+                val lower = name.lowercase()
+                if (lower.endsWith(".apk") || lower.endsWith(".ko") || lower.endsWith(".sha256") || lower.endsWith(".sig") || lower.endsWith(".asc")) {
+                    return@filter false
+                }
+                if (preferKdpOnly && !lower.contains("kdp") && !lower.contains("samsung") && !tagLower.contains("kdp")) {
+                    return@filter false
+                }
+                true
+            }
+            val best = ManagerReleaseFetcher.selectBestKsudAsset(candidates)
+            if (best != null && best.kind != ManagerReleaseFetcher.AssetKind.APK_EMBEDDED_KSUD) {
+                return Triple(tag, best.name, best.downloadUrl)
+            }
+        }
+        return null
+    }
+
+    internal fun selectYukisuReleaseAsset(
+        releasesJson: String,
+        preferKdpOnly: Boolean,
+    ): Triple<String, String, String>? {
+        return selectYukisuAssetFromReleases(parseReleasesJson(releasesJson), preferKdpOnly)
+    }
+
+    private fun parseReleasesJson(releasesJson: String): List<Pair<String, List<Triple<String, String, Long>>>> {
         val arr = org.json.JSONArray(releasesJson)
         val parsed = ArrayList<Pair<String, List<Triple<String, String, Long>>>>()
         for (i in 0 until arr.length()) {
@@ -572,7 +730,7 @@ object DfKsudUpdater {
             }
             parsed.add(tag to assets)
         }
-        return selectSukisuAssetFromReleases(parsed, preferKdpOnly)
+        return parsed
     }
 
     /** Profile ID used for downloaded KernelSU Next builds (e.g. 3.4.2-kdp-samsung -> "3.4.2 · kdp-samsung"). */

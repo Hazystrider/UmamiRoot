@@ -89,6 +89,8 @@ class MainActivity : ComponentActivity(), Shizuku.OnRequestPermissionResultListe
     private var ksudClassicProfileId by mutableStateOf("")
     private var ksudSukisuProfiles by mutableStateOf<List<KsudNextProfile>>(emptyList())
     private var ksudSukisuProfileId by mutableStateOf("")
+    private var ksudYukisuProfiles by mutableStateOf<List<KsudNextProfile>>(emptyList())
+    private var ksudYukisuProfileId by mutableStateOf("")
     // DEV — updater ksud Next (blue button, new method section).
     private var ksudUpdateRunning by mutableStateOf(false)
     private var ksudUpdateLog by mutableStateOf("")
@@ -112,7 +114,7 @@ class MainActivity : ComponentActivity(), Shizuku.OnRequestPermissionResultListe
         useLatestKsu = engine.useLatestKsu
         latestKsuTag = engine.latestKsuTag()
         autoRootOnBoot = engine.autoRootOnBoot
-        ksuFlavor = engine.ksuFlavor.takeIf { it in setOf("kernelsu", "kernelsu_next", "sukisu_nova") } ?: "kernelsu"
+        ksuFlavor = engine.ksuFlavor.takeIf { it in setOf("kernelsu", "kernelsu_next", "sukisu_nova", "yukisu") } ?: "kernelsu"
         ksuNextMode = ksuFlavor == "kernelsu_next"
         kernelManagerId = engine.kernelManagerId
         customManagerPackage = engine.customManagerPackage
@@ -123,6 +125,8 @@ class MainActivity : ComponentActivity(), Shizuku.OnRequestPermissionResultListe
         ksudClassicProfileId = KsudClassicProfiles.selected(this)?.id ?: ""
         ksudSukisuProfiles = com.uniroot.app.newmethod.SukisuNovaProfiles.list(this)
         ksudSukisuProfileId = com.uniroot.app.newmethod.SukisuNovaProfiles.selected(this)?.id ?: ""
+        ksudYukisuProfiles = com.uniroot.app.newmethod.YukisuProfiles.list(this)
+        ksudYukisuProfileId = com.uniroot.app.newmethod.YukisuProfiles.selected(this)?.id ?: ""
         val appPrefs = getSharedPreferences("uniroot_prefs", MODE_PRIVATE)
         newMethod = if (appPrefs.contains("root_method_new")) {
             appPrefs.getBoolean("root_method_new", false)
@@ -209,6 +213,8 @@ class MainActivity : ComponentActivity(), Shizuku.OnRequestPermissionResultListe
                     ksudClassicProfileId = ksudClassicProfileId,
                     ksudSukisuProfiles = ksudSukisuProfiles,
                     ksudSukisuProfileId = ksudSukisuProfileId,
+                    ksudYukisuProfiles = ksudYukisuProfiles,
+                    ksudYukisuProfileId = ksudYukisuProfileId,
                     ksudUpdateRunning = ksudUpdateRunning,
                     ksudUpdateLog = ksudUpdateLog,
                     ksudUpdateSheetVisible = ksudUpdateSheetVisible,
@@ -250,6 +256,7 @@ class MainActivity : ComponentActivity(), Shizuku.OnRequestPermissionResultListe
                         ksudUpdateSheetVisible = true
                         val targetFlavor = when (ksuFlavor) {
                             "sukisu_nova" -> com.uniroot.app.newmethod.DfKsudUpdater.Flavor.SUKISU_NOVA
+                            "yukisu" -> com.uniroot.app.newmethod.DfKsudUpdater.Flavor.YUKISU
                             "kernelsu_next" -> com.uniroot.app.newmethod.DfKsudUpdater.Flavor.NEXT
                             else -> com.uniroot.app.newmethod.DfKsudUpdater.Flavor.CLASSIC
                         }
@@ -281,6 +288,9 @@ class MainActivity : ComponentActivity(), Shizuku.OnRequestPermissionResultListe
                             ksudSukisuProfiles = com.uniroot.app.newmethod.SukisuNovaProfiles.list(this@MainActivity)
                             ksudSukisuProfileId = com.uniroot.app.newmethod.SukisuNovaProfiles.selected(this@MainActivity)?.id ?: ""
                             engine.ksudSukisuProfile = ksudSukisuProfileId
+                            ksudYukisuProfiles = com.uniroot.app.newmethod.YukisuProfiles.list(this@MainActivity)
+                            ksudYukisuProfileId = com.uniroot.app.newmethod.YukisuProfiles.selected(this@MainActivity)?.id ?: ""
+                            engine.ksudYukisuProfile = ksudYukisuProfileId
                             ksudUpdateRunning = false
                         }
                     }
@@ -308,6 +318,13 @@ class MainActivity : ComponentActivity(), Shizuku.OnRequestPermissionResultListe
                         ksudSukisuProfileId = com.uniroot.app.newmethod.SukisuNovaProfiles.selected(this@MainActivity)?.id ?: ""
                         engine.ksudSukisuProfile = ksudSukisuProfileId
                     }
+                    override fun onDeleteKsudYukisuProfile(id: String) {
+                        if (!com.uniroot.app.newmethod.YukisuProfiles.deleteDynamic(this@MainActivity, id)) return
+                        engine.appendLog("[KsudUpdate] YukiSU profile deleted: $id")
+                        ksudYukisuProfiles = com.uniroot.app.newmethod.YukisuProfiles.list(this@MainActivity)
+                        ksudYukisuProfileId = com.uniroot.app.newmethod.YukisuProfiles.selected(this@MainActivity)?.id ?: ""
+                        engine.ksudYukisuProfile = ksudYukisuProfileId
+                    }
                     override fun onKsudClassicProfileChanged(id: String) {
                         ksudClassicProfileId = id
                         KsudClassicProfiles.setSelected(this@MainActivity, id)
@@ -319,6 +336,13 @@ class MainActivity : ComponentActivity(), Shizuku.OnRequestPermissionResultListe
                         engine.ksudSukisuProfile = id
                         val label = ksudSukisuProfiles.firstOrNull { it.id == id }?.label ?: id
                         engine.appendLog("[NewMethod] SukiSU-Nova profile: $label")
+                    }
+                    override fun onKsudYukisuProfileChanged(id: String) {
+                        ksudYukisuProfileId = id
+                        com.uniroot.app.newmethod.YukisuProfiles.setSelected(this@MainActivity, id)
+                        engine.ksudYukisuProfile = id
+                        val label = ksudYukisuProfiles.firstOrNull { it.id == id }?.label ?: id
+                        engine.appendLog("[NewMethod] YukiSU profile: $label")
                     }
                     override fun onDisableRoot() = disableRoot()
                     override fun onInstantRootEnable() { instantRootOfferVisible = false; enableInstantRoot() }
@@ -424,7 +448,7 @@ class MainActivity : ComponentActivity(), Shizuku.OnRequestPermissionResultListe
                         onKsuFlavorSelected(if (next) "kernelsu_next" else "kernelsu")
                     }
                     override fun onKsuFlavorSelected(flavor: String) {
-                        val normalized = flavor.takeIf { it in setOf("kernelsu", "kernelsu_next", "sukisu_nova") } ?: "kernelsu"
+                        val normalized = flavor.takeIf { it in setOf("kernelsu", "kernelsu_next", "sukisu_nova", "yukisu") } ?: "kernelsu"
                         ksuFlavor = normalized
                         ksuNextMode = normalized == "kernelsu_next"
                         engine.ksuFlavor = normalized
@@ -482,6 +506,11 @@ class MainActivity : ComponentActivity(), Shizuku.OnRequestPermissionResultListe
                         val mgr = engine.selectedKernelManager()
                         if (mgr == com.uniroot.app.engine.KernelManagerType.SUKISU_NOVA) {
                             if (ksuFlavor != "sukisu_nova") onKsuFlavorSelected("sukisu_nova")
+                            onUpdateKsud()
+                            return
+                        }
+                        if (mgr == com.uniroot.app.engine.KernelManagerType.YUKISU) {
+                            if (ksuFlavor != "yukisu") onKsuFlavorSelected("yukisu")
                             onUpdateKsud()
                             return
                         }
@@ -783,6 +812,7 @@ class MainActivity : ComponentActivity(), Shizuku.OnRequestPermissionResultListe
         val flavorLabel = when (ksuFlavor) {
             "kernelsu_next" -> "KernelSU Next"
             "sukisu_nova" -> "SukiSU-Nova"
+            "yukisu" -> "YukiSU"
             else -> "KernelSU"
         }
         engine.appendLog("[NewMethod] moteur DF (base 4.4.8 éprouvée, DirtyFrag CVE-2026-43284) — $flavorLabel")

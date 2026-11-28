@@ -8,7 +8,7 @@
 
 ![Target](https://img.shields.io/badge/Target-Samsung%20Galaxy%20(S22%20%E2%86%92%20S26%20%C2%B7%20GKI%202.0%205.10%E2%80%936.18)-253D6E?style=flat&labelColor=1B1D24)
 ![Root Engines](https://img.shields.io/badge/Engines-DirtyFrag%20%7C%20Profile%20Pipeline-2B5AC2?style=flat&labelColor=1B1D24)
-![Kernels](https://img.shields.io/badge/Kernels-KSU%203.4.0%20%7C%20KSU--Next%20%7C%20SukiSU--Nova-176E4A?style=flat&labelColor=1B1D24)
+![Kernels](https://img.shields.io/badge/Kernels-KSU%203.4.0%20%7C%20KSU--Next%20%7C%20SukiSU--Nova%20%7C%20YukiSU-176E4A?style=flat&labelColor=1B1D24)
 
 [![Latest Release](https://img.shields.io/github/v/release/Hazystrider/UmamiRoot?label=Latest%20Release&logo=git&logoColor=white&color=176E4A&labelColor=1B1D24&style=flat)](https://github.com/Hazystrider/UmamiRoot/releases/latest)
 [![Total Commits](https://img.shields.io/github/commit-activity/t/Hazystrider/UmamiRoot?label=Total%20Commits&logo=git&logoColor=white&color=176E4A&labelColor=1B1D24&style=flat)](https://github.com/Hazystrider/UmamiRoot/commits)
@@ -25,7 +25,7 @@
 
 ## About
 
-**UmamiRoot** (`v6.1.0`) is my fork of **UniRoot** for Samsung Galaxy devices, built around the Knox-safe DirtyFrag late-load engine with **KernelSU 3.4.0+** alignment and **SukiSU-Nova** Samsung KDP/RKP/DEFEX support wired in alongside KernelSU Classic and KernelSU-Next. See [CHANGELOG.md](./CHANGELOG.md) for version history.
+**UmamiRoot** (`v6.2.0`) is my fork of **UniRoot** for Samsung Galaxy devices, built around the Knox-safe DirtyFrag late-load engine with **KernelSU 3.4.0+** alignment, **SukiSU-Nova** Samsung KDP/RKP/DEFEX support, and **YukiSU** flavor wiring alongside KernelSU Classic and KernelSU-Next. See [CHANGELOG.md](./CHANGELOG.md) for version history.
 
 ---
 

@@ -247,6 +247,50 @@ class DfKsudUpdaterTest {
         )
     }
 
+    @Test
+    fun yukisuProfileIdsAndReleaseSelection() {
+        assertEquals("yukisu-kdp-20261128-012000", DfKsudUpdater.yukisuProfileId("yukisu-kdp-20261128-012000", true))
+        assertEquals("1.9.0-kdp-samsung", DfKsudUpdater.yukisuProfileId("v1.9.0", true))
+        assertEquals("1.9.0-yukisu", DfKsudUpdater.yukisuProfileId("v1.9.0", false))
+
+        val parsedKdp = YukisuProfiles.parseProfileId("yukisu-kdp-20261128-012000")
+        assertEquals("20261128 · kdp-samsung", parsedKdp.label)
+        assertEquals("kdp-samsung", parsedKdp.variant)
+
+        val parsedUpstream = YukisuProfiles.parseProfileId("1.9.0-yukisu")
+        assertEquals("1.9.0 · yukisu", parsedUpstream.label)
+
+        // Ensure SukiSU-Nova and YukiSU releases on the same repo stay cleanly isolated.
+        val mixedReleases = listOf(
+            "sukisu-kdp-20261127-030955" to listOf(
+                Triple("ksud-sukisu-nova-samsung-kdp-aarch64", "https://example.invalid/sukisu-kdp", 8_100_000L),
+            ),
+            "yukisu-kdp-20261128-012000" to listOf(
+                Triple("ksud-yukisu-samsung-kdp-aarch64", "https://example.invalid/yukisu-kdp", 6_200_000L),
+            ),
+        )
+        assertEquals(
+            Triple("yukisu-kdp-20261128-012000", "ksud-yukisu-samsung-kdp-aarch64", "https://example.invalid/yukisu-kdp"),
+            DfKsudUpdater.selectYukisuAssetFromReleases(mixedReleases, preferKdpOnly = true),
+        )
+        assertEquals(
+            Triple("sukisu-kdp-20261127-030955", "ksud-sukisu-nova-samsung-kdp-aarch64", "https://example.invalid/sukisu-kdp"),
+            DfKsudUpdater.selectSukisuAssetFromReleases(mixedReleases, preferKdpOnly = true),
+        )
+
+        val upstreamYukisu = listOf(
+            "v1.9.0" to listOf(
+                Triple("ksud-aarch64-linux-android.sig", "https://example.invalid/sig", 134L),
+                Triple("ksud-aarch64-linux-android", "https://example.invalid/yukisu-arm64", 6_186_960L),
+                Triple("YukiSU_v1.9.0_10700-arm64-v8a-release.apk", "https://example.invalid/apk", 13_000_000L),
+            ),
+        )
+        assertEquals(
+            Triple("v1.9.0", "ksud-aarch64-linux-android", "https://example.invalid/yukisu-arm64"),
+            DfKsudUpdater.selectYukisuAssetFromReleases(upstreamYukisu, preferKdpOnly = false),
+        )
+    }
+
     private data class Embedded(
         val start: Int,
         val consumed: Int,

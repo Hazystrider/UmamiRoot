@@ -3,6 +3,14 @@
 All notable changes to **UmamiRoot** are documented in this file.
 Versioning follows [Semantic Versioning](https://semver.org/) (`MAJOR.MINOR.PATCH`).
 
+## [6.2.0] - 2026-11-28
+
+### Added
+- **YukiSU** flavor wiring in the 2×2 `FlavorSwitch` (`KernelSU` | `KSU Next` / `SukiSU-Nova` | `YukiSU`), `YukisuProfiles.kt`, and `DfKsudUpdater.Flavor.YUKISU` (targets `yukisu-kdp-*` releases on `Hazystrider/UmamiRoot` with upstream `Rouyashiki/YukiSU` fallback and isolated release matching).
+- `DFBridge.load("yukisu")` with safe `libexpyukisu.so` → `libexp.so` fallback and `YukisuProfiles` staging.
+- GKI 2.0 (`5.10`–`6.18`) supported models & kernel compatibility table in `README.md`.
+- Unit tests covering `YukisuProfiles` ID parsing and isolated SukiSU-Nova vs YukiSU release asset selection.
+
 ## [6.1.0] - 2026-11-27
 
 ### Added

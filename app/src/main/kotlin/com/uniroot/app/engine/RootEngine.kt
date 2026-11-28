@@ -103,6 +103,10 @@ class RootEngine(private val context: Context) {
         get() = prefs.getString("sukisu_nova_profile", "") ?: ""
         set(value) = prefs.edit().putString("sukisu_nova_profile", value).apply()
 
+    var ksudYukisuProfile: String
+        get() = prefs.getString("yukisu_profile", "") ?: ""
+        set(value) = prefs.edit().putString("yukisu_profile", value).apply()
+
     fun latestKsuTag(): String = prefs.getString("latest_ksu_tag", "") ?: ""
 
     fun setLatestKsuTag(tag: String) = prefs.edit().putString("latest_ksu_tag", tag).apply()
@@ -572,6 +576,7 @@ class RootEngine(private val context: Context) {
         val name = when (flavor) {
             "kernelsu_next" -> "ksud-custom-next"
             "sukisu_nova" -> "ksud-custom-sukisu"
+            "yukisu" -> "ksud-custom-yukisu"
             else -> "ksud-custom-classic"
         }
         return File(context.filesDir.parentFile ?: context.filesDir, name)

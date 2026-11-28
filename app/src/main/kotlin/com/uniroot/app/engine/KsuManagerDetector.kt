@@ -70,7 +70,7 @@ enum class KernelManagerType(
         knownPackages = listOf("com.yukisu.yukisu", "moe.yukisu.manager", "com.yukisu.manager"),
         labelKeywords = listOf("YukiSU"),
         prefersCustomKsud = true,
-        githubRepos = listOf("Rouyashiki/YukiSU"),
+        githubRepos = listOf("Hazystrider/UmamiRoot", "Rouyashiki/YukiSU"),
     ),
     XECKERNEL(
         id = "xeckernel",

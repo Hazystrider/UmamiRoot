@@ -160,6 +160,9 @@ data class UniUiState(
     // New method + SukiSU-Nova : bundled & dynamic KDP profiles.
     val ksudSukisuProfiles: List<KsudNextProfile> = emptyList(),
     val ksudSukisuProfileId: String = "",
+    // New method + YukiSU : bundled & dynamic KDP profiles.
+    val ksudYukisuProfiles: List<KsudNextProfile> = emptyList(),
+    val ksudYukisuProfileId: String = "",
     // DEV — updater ksud Next (télécharge + patche + crée un profil).
     val ksudUpdateRunning: Boolean = false,
     val ksudUpdateLog: String = "",
@@ -230,8 +233,10 @@ interface UniActions {
     fun onCloseKsudUpdateSheet()
     fun onDeleteKsudProfile(id: String, classic: Boolean)
     fun onDeleteKsudSukisuProfile(id: String)
+    fun onDeleteKsudYukisuProfile(id: String)
     fun onKsudClassicProfileChanged(id: String)
     fun onKsudSukisuProfileChanged(id: String)
+    fun onKsudYukisuProfileChanged(id: String)
 }
 
 private fun umamiDarkColorScheme() = darkColorScheme(
@@ -714,6 +719,7 @@ private fun UniKsudUpdateSheet(
         show = state.ksudUpdateSheetVisible,
         title = when (state.ksuFlavor) {
             "sukisu_nova" -> "Update ksud SukiSU-Nova"
+            "yukisu" -> "Update ksud YukiSU"
             "kernelsu_next" -> "Update ksud Next"
             else -> "Update ksud classic"
         },
@@ -1083,6 +1089,7 @@ private fun ControlPanel(
                         "Updating ksud…"
                     } else when (state.ksuFlavor) {
                         "sukisu_nova" -> "⬇  Update ksud SukiSU-Nova"
+                        "yukisu" -> "⬇  Update ksud YukiSU"
                         "kernelsu_next" -> "⬇  Update ksud Next"
                         else -> "⬇  Update ksud classic"
                     },
@@ -1100,7 +1107,7 @@ private fun ControlPanel(
                 onRun = actions::onRun,
                 modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
             )
-            // ksud profile band — SAME style for KernelSU Next, SukiSU-Nova, and KernelSU classic.
+            // ksud profile band — SAME style for KernelSU Next, SukiSU-Nova, YukiSU, and KernelSU classic.
             if (state.ksuFlavor == "kernelsu_next" && state.ksudNextProfiles.isNotEmpty()) {
                 Card(modifier = Modifier.fillMaxWidth().padding(top = 12.dp)) {
                     OverlaySpinnerPreference(
@@ -1133,6 +1140,32 @@ private fun ControlPanel(
                             actions.onKsudSukisuProfileChanged(state.ksudSukisuProfiles[index].id)
                         },
                     )
+                }
+            }
+            if (state.ksuFlavor == "yukisu") {
+                Card(modifier = Modifier.fillMaxWidth().padding(top = 12.dp)) {
+                    if (state.ksudYukisuProfiles.isNotEmpty()) {
+                        OverlaySpinnerPreference(
+                            title = "YukiSU profile",
+                            items = state.ksudYukisuProfiles.map {
+                                DropdownItem(icon = null, title = it.label)
+                            },
+                            selectedIndex = state.ksudYukisuProfiles
+                                .indexOfFirst { it.id == state.ksudYukisuProfileId }
+                                .coerceAtLeast(0),
+                            showValue = true,
+                            onSelectedIndexChange = { index ->
+                                actions.onKsudYukisuProfileChanged(state.ksudYukisuProfiles[index].id)
+                            },
+                        )
+                    } else {
+                        Text(
+                            text = "No YukiSU profile downloaded yet — tap Update ksud YukiSU above.",
+                            modifier = Modifier.fillMaxWidth().padding(16.dp),
+                            fontSize = 13.sp,
+                            color = MiuixTheme.colorScheme.onSurface.copy(alpha = 0.72f),
+                        )
+                    }
                 }
             }
             if (state.ksuFlavor == "kernelsu" && state.ksudClassicProfiles.isNotEmpty()) {
@@ -1317,6 +1350,25 @@ private fun NewMethodOptions(
                 }
             }
         }
+        val dynamicYukisu = state.ksudYukisuProfiles.filter { it.dynamic }
+        if (dynamicYukisu.isNotEmpty()) {
+            Card(modifier = Modifier.fillMaxWidth().padding(top = 12.dp)) {
+                Column(modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
+                    Text(
+                        text = "Downloaded YukiSU profiles",
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MiuixTheme.colorScheme.onSurface,
+                    )
+                    for (p in dynamicYukisu) {
+                        ProfileDeleteRow(label = p.label, note = p.note) {
+                            actions.onDeleteKsudYukisuProfile(p.id)
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1350,38 +1402,50 @@ private fun ProfileDeleteRow(label: String, note: String, onDelete: () -> Unit) 
     }
 }
 
-/** Home-page 3-way switch: KernelSU | KSU Next | SukiSU-Nova. */
+/** Home-page 4-way switch (2x2 grid): KernelSU | KSU Next / SukiSU-Nova | YukiSU. */
 @Composable
 private fun FlavorSwitch(
     flavor: String,
     onSelect: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    Row(
-        modifier = modifier,
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        val entries = listOf(
+    val rows = listOf(
+        listOf(
             "kernelsu" to stringResource(R.string.flavor_kernelsu),
             "kernelsu_next" to stringResource(R.string.flavor_ksunext),
+        ),
+        listOf(
             "sukisu_nova" to stringResource(R.string.flavor_sukisu),
-        )
-        for ((id, label) in entries) {
-            val selected = id == flavor
-            val bg = if (selected) MiuixTheme.colorScheme.primary else MiuixTheme.colorScheme.primary.copy(alpha = 0.08f)
-            val fg = if (selected) {
-                MiuixTheme.colorScheme.onPrimary
-            } else MiuixTheme.colorScheme.onSurface.copy(alpha = 0.75f)
-            Box(
-                modifier = Modifier
-                    .weight(1f)
-                    .clip(RoundedCornerShape(16.dp))
-                    .background(bg)
-                    .clickable { onSelect(id) }
-                    .padding(vertical = 10.dp),
-                contentAlignment = Alignment.Center,
+            "yukisu" to stringResource(R.string.flavor_yukisu),
+        ),
+    )
+    Column(
+        modifier = modifier,
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        for (rowEntries in rows) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                Text(text = label, color = fg, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                for ((id, label) in rowEntries) {
+                    val selected = id == flavor
+                    val bg = if (selected) MiuixTheme.colorScheme.primary else MiuixTheme.colorScheme.primary.copy(alpha = 0.08f)
+                    val fg = if (selected) {
+                        MiuixTheme.colorScheme.onPrimary
+                    } else MiuixTheme.colorScheme.onSurface.copy(alpha = 0.75f)
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(16.dp))
+                            .background(bg)
+                            .clickable { onSelect(id) }
+                            .padding(vertical = 10.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(text = label, color = fg, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                    }
+                }
             }
         }
     }
@@ -1464,6 +1528,11 @@ private fun KernelManagerCard(
                             val label = state.ksudSukisuProfiles.firstOrNull { it.id == state.ksudSukisuProfileId }?.label
                                 ?: state.ksudSukisuProfiles.firstOrNull()?.label ?: "bundled SukiSU-Nova"
                             "Using KDP ksud: $label (SukiSU-Nova)"
+                        }
+                        "yukisu" -> {
+                            val label = state.ksudYukisuProfiles.firstOrNull { it.id == state.ksudYukisuProfileId }?.label
+                                ?: state.ksudYukisuProfiles.firstOrNull()?.label
+                            if (label != null) "Using ksud: $label (YukiSU)" else "No YukiSU profile downloaded yet"
                         }
                         else -> {
                             val label = state.ksudClassicProfiles.firstOrNull { it.id == state.ksudClassicProfileId }?.label

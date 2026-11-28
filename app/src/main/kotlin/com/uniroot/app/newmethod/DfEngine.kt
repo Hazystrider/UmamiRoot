@@ -54,6 +54,7 @@ object DfEngine {
         val flavorLabel = when (flavor) {
             "kernelsu_next" -> "KernelSU Next"
             "sukisu_nova" -> "SukiSU-Nova"
+            "yukisu" -> "YukiSU"
             else -> "KernelSU"
         }
         stage = "DF engine ready ($flavorLabel)"
