@@ -81,6 +81,7 @@ Set `KSUD_TEST_FIXTURE` to the SHA-256-verified official `ksud` v3.4.2 binary to
 
 - **[Debug APK](.github/workflows/debug-apk.yml):** Runs all unit tests with the verified `ksud` fixture and uploads a downloadable debug APK + SHA-256 in the run summary (requires GitHub sign-in, retained 90 days; signed with a temporary debug key so it can't update an APK signed with another key).
 - **[Build SukiSU-Nova Samsung KDP](.github/workflows/build-sukisu-nova-kdp.yml):** Applies [`patches/sukisu-nova-samsung-kdp-rkp-defex.patch`](./patches/sukisu-nova-samsung-kdp-rkp-defex.patch) and compiles `kernelsu.ko` + `ksud` across Android 12–17 KMI targets.
+- **[Build YukiSU Samsung KDP](.github/workflows/build-yukisu-kdp.yml):** Applies [`patches/yukisu-samsung-kdp-rkp-defex.patch`](./patches/yukisu-samsung-kdp-rkp-defex.patch) and compiles YukiSU `kernelsu.ko` + `ksud-yukisu-samsung-kdp-aarch64` across Android 12–17 KMI targets (`yukisu-kdp-*` releases).
 
 ---
 

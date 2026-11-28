@@ -1,0 +1,190 @@
+name: Build YukiSU Samsung KDP (LKM + ksud)
+
+on:
+  workflow_dispatch:
+    inputs:
+      yukisu_ref:
+        description: 'YukiSU tag or commit to patch'
+        required: false
+        default: 'v1.9.0'
+        type: string
+      ddk_release:
+        description: 'DDK container release tag'
+        required: false
+        default: '20260828'
+        type: string
+      publish_release:
+        description: 'Publish GitHub Release with ksud + .ko assets'
+        required: false
+        default: true
+        type: boolean
+  push:
+    branches:
+      - main
+    paths:
+      - 'patches/yukisu-samsung-kdp-rkp-defex.patch'
+      - '.github/workflows/build-yukisu-kdp.yml'
+
+permissions:
+  contents: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  ANDROID_NDK_VERSION: '30.0.16248370'
+
+jobs:
+  build-lkm:
+    name: Build YukiSU Samsung-KDP LKM (${{ matrix.kmi }})
+    runs-on: ubuntu-24.04
+    container:
+      image: ghcr.io/ylarod/ddk-min:${{ matrix.kmi }}-${{ inputs.ddk_release || '20260828' }}
+      options: --privileged
+    strategy:
+      fail-fast: false
+      matrix:
+        kmi:
+          - android12-5.10
+          - android13-5.10
+          - android13-5.15
+          - android14-5.15
+          - android14-6.1
+          - android15-6.6
+          - android16-6.12
+          - android17-6.18
+    steps:
+      - name: Checkout UmamiRoot
+        uses: actions/checkout@v5
+
+      - name: Clone & patch YukiSU
+        run: |
+          set -eux
+          REF="${{ inputs.yukisu_ref || 'v1.9.0' }}"
+          git clone --depth 1 --branch "$REF" https://github.com/Rouyashiki/YukiSU.git yukisu
+          git -C yukisu apply "${GITHUB_WORKSPACE}/patches/yukisu-samsung-kdp-rkp-defex.patch"
+
+      - name: Build kernelsu.ko with Samsung KDP/RKP/DEFEX
+        run: |
+          set -eux
+          cd yukisu/kernel
+          make clean
+          make -j"$(nproc)" \
+            CONFIG_KSU=m \
+            CONFIG_KSU_SUPERKEY=y \
+            CONFIG_KSU_SAMSUNG_KDP=y \
+            CONFIG_KSU_SAMSUNG_RKP=y \
+            CONFIG_KSU_SAMSUNG_DEFEX=y \
+            CONFIG_KSU_SAMSUNG_NO_PATCH_TEXT=y \
+            CC=clang
+          mkdir -p "${GITHUB_WORKSPACE}/out"
+          cp kernelsu.ko "${GITHUB_WORKSPACE}/out/${{ matrix.kmi }}_kernelsu.ko"
+          llvm-strip -d "${GITHUB_WORKSPACE}/out/${{ matrix.kmi }}_kernelsu.ko"
+          llvm-nm "${GITHUB_WORKSPACE}/out/${{ matrix.kmi }}_kernelsu.ko" | grep -q "ksu_samsung_kdp_init"
+          llvm-nm "${GITHUB_WORKSPACE}/out/${{ matrix.kmi }}_kernelsu.ko" | grep -q "ksu_samsung_defex_init"
+          llvm-nm "${GITHUB_WORKSPACE}/out/${{ matrix.kmi }}_kernelsu.ko" | grep -q "ksu_samsung_rkp_init"
+          ls -lh "${GITHUB_WORKSPACE}/out/${{ matrix.kmi }}_kernelsu.ko"
+
+      - name: Upload LKM artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: yukisu-lkm-${{ matrix.kmi }}
+          path: out/${{ matrix.kmi }}_kernelsu.ko
+          retention-days: 14
+
+  build-ksud:
+    name: Build YukiSU Samsung-KDP ksud (aarch64)
+    needs: build-lkm
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout UmamiRoot
+        uses: actions/checkout@v5
+
+      - name: Install Ninja & CMake
+        run: |
+          set -eux
+          sudo apt-get update
+          sudo apt-get install -y ninja-build cmake
+
+      - name: Ensure Android NDK ${{ env.ANDROID_NDK_VERSION }}
+        run: |
+          set -eux
+          sdk_root="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}"
+          test -n "$sdk_root"
+          ndk_root="$sdk_root/ndk/${ANDROID_NDK_VERSION}"
+          if [ ! -x "$ndk_root/toolchains/llvm/prebuilt/linux-x86_64/bin/clang" ]; then
+            yes | "$sdk_root/cmdline-tools/latest/bin/sdkmanager" "ndk;${ANDROID_NDK_VERSION}"
+          fi
+          test -x "$ndk_root/toolchains/llvm/prebuilt/linux-x86_64/bin/clang"
+          echo "ANDROID_NDK_HOME=$ndk_root" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=$ndk_root" >> "$GITHUB_ENV"
+
+      - name: Clone YukiSU (with submodules)
+        run: |
+          set -eux
+          REF="${{ inputs.yukisu_ref || 'v1.9.0' }}"
+          git clone --depth 1 --branch "$REF" --recurse-submodules --shallow-submodules \
+            https://github.com/Rouyashiki/YukiSU.git yukisu
+
+      - name: Download compiled Samsung-KDP LKMs
+        uses: actions/download-artifact@v5
+        with:
+          pattern: yukisu-lkm-*
+          path: lkm-artifacts
+          merge-multiple: true
+
+      - name: Stage Samsung-KDP LKMs into YukiSU ksud assets
+        run: |
+          set -eux
+          mkdir -p yukisu/userspace/ksud/assets
+          rm -f yukisu/userspace/ksud/assets/*_kernelsu.ko
+          cp lkm-artifacts/*_kernelsu.ko yukisu/userspace/ksud/assets/
+          ls -lh yukisu/userspace/ksud/assets/*_kernelsu.ko
+
+      - name: Build YukiSU ksud (aarch64-linux-android)
+        run: |
+          set -eux
+          cd yukisu/userspace/ksud
+          mkdir -p build && cd build
+          TOOLCHAIN="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64"
+          export CC="${TOOLCHAIN}/bin/aarch64-linux-android31-clang"
+          export CXX="${TOOLCHAIN}/bin/aarch64-linux-android31-clang++"
+          export AR="${TOOLCHAIN}/bin/llvm-ar"
+          export RANLIB="${TOOLCHAIN}/bin/llvm-ranlib"
+          export STRIP="${TOOLCHAIN}/bin/llvm-strip"
+
+          cmake .. \
+            -G Ninja \
+            -DCMAKE_SYSTEM_NAME=Android \
+            -DCMAKE_ANDROID_ARCH_ABI=arm64-v8a \
+            -DCMAKE_ANDROID_NDK="${ANDROID_NDK_HOME}" \
+            -DCMAKE_SYSTEM_VERSION=31 \
+            -DCMAKE_C_COMPILER="$CC" \
+            -DCMAKE_CXX_COMPILER="$CXX" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DYUKISU_ENABLE_CLANG_TIDY=OFF
+
+          ninja
+          mkdir -p "${GITHUB_WORKSPACE}/dist"
+          cp ksud "${GITHUB_WORKSPACE}/dist/ksud-yukisu-samsung-kdp-aarch64"
+          cp "${GITHUB_WORKSPACE}/lkm-artifacts"/*_kernelsu.ko "${GITHUB_WORKSPACE}/dist/"
+          ls -lh "${GITHUB_WORKSPACE}/dist/"
+
+      - name: Upload YukiSU ksud + LKM bundle
+        uses: actions/upload-artifact@v6
+        with:
+          name: yukisu-samsung-kdp-bundle
+          path: dist/*
+          retention-days: 30
+
+      - name: Publish GitHub Release
+        if: ${{ github.event_name == 'push' || inputs.publish_release == true }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eux
+          TAG="${GITHUB_REF_NAME}"
+          if [[ "$TAG" != yukisu-kdp-* ]]; then
+            TAG="yukisu-kdp-$(date -u +%Y%m%d-%H%M%S)"
+          fi
+          gh release create "$TAG" dist/* \
+            --title "YukiSU Samsung KDP/RKP/DEFEX ($TAG)" \
+            --notes "Samsung KDP/RKP/DEFEX-patched YukiSU GKI 2.0 LKM modules (android12-5.10 .. android17-6.18) and ksud-yukisu-samsung-kdp-aarch64 with embedded Samsung KDP LKMs."

@@ -1,0 +1,993 @@
+diff --git a/kernel/Kbuild b/kernel/Kbuild
+index 8b50743..d387f28 100644
+--- a/kernel/Kbuild
++++ b/kernel/Kbuild
+@@ -2,6 +2,9 @@ MDIR := $(realpath $(dir $(abspath $(lastword $(MAKEFILE_LIST)))))
+ 
+ kernelsu-objs := core/init.o
+ kernelsu-objs += core/imgpatch_config.o
++kernelsu-objs += compat/samsung_kdp.o
++kernelsu-objs += compat/samsung_defex.o
++kernelsu-objs += compat/samsung_rkp.o
+ kernelsu-objs += policy/allowlist.o
+ kernelsu-objs += policy/app_profile.o
+ kernelsu-objs += feature/sucompat.o
+@@ -76,6 +79,22 @@ endif
+ ifeq ($(CONFIG_KSU_DEBUG),y)
+ ccflags-y += -DCONFIG_KSU_DEBUG=1
+ endif
++CONFIG_KSU_SAMSUNG_KDP ?= y
++CONFIG_KSU_SAMSUNG_RKP ?= y
++CONFIG_KSU_SAMSUNG_DEFEX ?= y
++CONFIG_KSU_SAMSUNG_NO_PATCH_TEXT ?= y
++ifeq ($(CONFIG_KSU_SAMSUNG_KDP),y)
++ccflags-y += -DCONFIG_KSU_SAMSUNG_KDP=1
++endif
++ifeq ($(CONFIG_KSU_SAMSUNG_RKP),y)
++ccflags-y += -DCONFIG_KSU_SAMSUNG_RKP=1
++endif
++ifeq ($(CONFIG_KSU_SAMSUNG_DEFEX),y)
++ccflags-y += -DCONFIG_KSU_SAMSUNG_DEFEX=1
++endif
++ifeq ($(CONFIG_KSU_SAMSUNG_NO_PATCH_TEXT),y)
++ccflags-y += -DCONFIG_KSU_SAMSUNG_NO_PATCH_TEXT=1
++endif
+ endif
+ 
+ # SuperKey support is enabled by default unless explicitly disabled.
+diff --git a/kernel/Kconfig b/kernel/Kconfig
+index 35c3317..a99dae5 100644
+--- a/kernel/Kconfig
++++ b/kernel/Kconfig
+@@ -75,4 +75,36 @@ config KSU_SUPERKEY
+ 	  The SuperKey can be set at compile time via KSU_SUPERKEY="your_key"
+ 	  or patched into the LKM binary by ksud.
+ 
++config KSU_SAMSUNG_KDP
++	bool "Samsung KDP credential compatibility"
++	depends on KSU && ARM64
++	default n
++	help
++	  Install and release credentials through Samsung KDP helpers.
++	  Enable only on Samsung kernels that use KDP-protected credentials.
++
++config KSU_SAMSUNG_RKP
++	bool "Samsung RKP hook compatibility"
++	depends on KSU && ARM64 && KPROBES && KRETPROBES
++	default n
++	help
++	  Use kprobe-based syscall fallbacks when Samsung RKP prevents live
++	  writes to the syscall table.
++
++config KSU_SAMSUNG_DEFEX
++	bool "Samsung DEFEX credential compatibility"
++	depends on KSU && ARM64 && KPROBES
++	default n
++	help
++	  Synchronize Samsung DEFEX task credentials after a KernelSU UID
++	  transition and bypass duplicate enforcement for KernelSU tasks.
++
++config KSU_SAMSUNG_NO_PATCH_TEXT
++	bool "Disable live kernel text/data patching on Samsung EL2"
++	depends on KSU && ARM64
++	default n
++	help
++	  Return -EOPNOTSUPP from KernelSU's live patch helper. Enable on
++	  Samsung kernels whose EL2 protection rejects fixmap writes.
++
+ endmenu
+diff --git a/kernel/compat/samsung_defex.c b/kernel/compat/samsung_defex.c
+new file mode 100644
+index 0000000..3547301
+--- /dev/null
++++ b/kernel/compat/samsung_defex.c
+@@ -0,0 +1,129 @@
++#include <linux/cred.h>
++#include <linux/errno.h>
++#include <linux/jump_label.h>
++#include <linux/kprobes.h>
++#include <linux/sched.h>
++
++#include "arch.h"
++#include "compat/samsung_defex.h"
++#include "infra/symbol_resolver.h"
++#include "klog.h"
++#include "selinux/selinux.h"
++
++#ifdef CONFIG_KSU_SAMSUNG_DEFEX
++typedef void (*defex_get_task_creds_t)(struct task_struct *task,
++				       unsigned int *uid, unsigned int *fsuid,
++				       unsigned int *egid,
++				       unsigned short *cred_flags);
++typedef int (*defex_set_task_creds_t)(struct task_struct *task,
++				      unsigned int uid, unsigned int fsuid,
++				      unsigned int egid,
++				      unsigned short cred_flags);
++
++static defex_get_task_creds_t defex_get_task_creds;
++static defex_set_task_creds_t defex_set_task_creds;
++static bool defex_enforce_hooked;
++
++/* Off = this kernel has no Samsung DEFEX (or its hooks were unavailable):
++ * the standard credential path is used and cred sync is skipped.  Flipped
++ * on in ksu_samsung_defex_init() once helpers resolved and the kprobe
++ * registered. */
++static DEFINE_STATIC_KEY_FALSE(ksu_samsung_defex_key);
++
++/* The module loader (ksud) is DEFEX-visible before it enters the KSU domain.
++ * Any root task stays exempt as well: zygisk module loading runs as root
++ * outside the KSU domain (polygraphene 91030640, credit @diabl0w). */
++static struct task_struct *ksu_trusted_task;
++
++static int ksu_samsung_defex_pre_handler(struct kprobe *probe,
++					 struct pt_regs *regs)
++{
++	struct task_struct *task = (struct task_struct *)PT_REGS_PARM1(regs);
++
++	(void)probe;
++	if (task == ksu_trusted_task || (task == current && current_uid().val == 0))
++		PT_REGS_PARM1(regs) = 0;
++
++	return 0;
++}
++
++static struct kprobe defex_enforce_kprobe = {
++	.symbol_name = "task_defex_enforce",
++	.pre_handler = ksu_samsung_defex_pre_handler,
++};
++#endif
++
++int ksu_samsung_defex_init(void)
++{
++#ifdef CONFIG_KSU_SAMSUNG_DEFEX
++	int ret;
++
++	ksu_trusted_task = current;
++
++	defex_get_task_creds =
++		(defex_get_task_creds_t)ksu_resolve_symbol_for_functable_hook(
++			"get_task_creds");
++	defex_set_task_creds =
++		(defex_set_task_creds_t)ksu_resolve_symbol_for_functable_hook(
++			"set_task_creds");
++	if (!defex_get_task_creds || !defex_set_task_creds) {
++		pr_info("Samsung DEFEX not present, using standard credential path\n");
++		return 0;
++	}
++
++	ret = register_kprobe(&defex_enforce_kprobe);
++	if (ret) {
++		pr_warn("Samsung DEFEX enforce hook unavailable: %d - DEFEX support disabled\n", ret);
++		return 0;
++	}
++	defex_enforce_hooked = true;
++	static_branch_enable(&ksu_samsung_defex_key);
++	pr_info("Samsung DEFEX compatibility and KSU-task bypass enabled\n");
++#endif
++	return 0;
++}
++
++void ksu_samsung_defex_exit(void)
++{
++#ifdef CONFIG_KSU_SAMSUNG_DEFEX
++	if (defex_enforce_hooked) {
++		unregister_kprobe(&defex_enforce_kprobe);
++		defex_enforce_hooked = false;
++	}
++	ksu_trusted_task = NULL;
++#endif
++}
++
++void ksu_samsung_defex_sync_current(void)
++{
++#ifdef CONFIG_KSU_SAMSUNG_DEFEX
++	const struct cred *cred = current_cred();
++	unsigned int stored_uid;
++	unsigned int stored_fsuid;
++	unsigned int stored_egid;
++	unsigned short cred_flags;
++	int ret;
++
++	if (!static_branch_unlikely(&ksu_samsung_defex_key))
++		return;
++
++	defex_get_task_creds(current, &stored_uid, &stored_fsuid, &stored_egid,
++			     &cred_flags);
++	if (__kuid_val(cred->euid) == 0 && __kuid_val(cred->fsuid) == 0 &&
++	    __kgid_val(cred->egid) == 0) {
++		stored_uid = 1;
++		stored_fsuid = 1;
++		stored_egid = 1;
++	} else {
++		stored_uid = __kuid_val(cred->euid);
++		stored_fsuid = __kuid_val(cred->fsuid);
++		stored_egid = __kgid_val(cred->egid);
++	}
++
++	ret = defex_set_task_creds(current, stored_uid, stored_fsuid,
++				   stored_egid, cred_flags);
++	if (ret)
++		pr_err("Samsung DEFEX credential synchronization failed: %d\n",
++		       ret);
++#endif
++}
+diff --git a/kernel/compat/samsung_defex.h b/kernel/compat/samsung_defex.h
+new file mode 100644
+index 0000000..f635af6
+--- /dev/null
++++ b/kernel/compat/samsung_defex.h
+@@ -0,0 +1,8 @@
++#ifndef __KSU_SAMSUNG_DEFEX_H
++#define __KSU_SAMSUNG_DEFEX_H
++
++int ksu_samsung_defex_init(void);
++void ksu_samsung_defex_exit(void);
++void ksu_samsung_defex_sync_current(void);
++
++#endif
+diff --git a/kernel/compat/samsung_kdp.c b/kernel/compat/samsung_kdp.c
+new file mode 100644
+index 0000000..0b613d2
+--- /dev/null
++++ b/kernel/compat/samsung_kdp.c
+@@ -0,0 +1,224 @@
++#include <linux/completion.h>
++#include <linux/cred.h>
++#include <linux/errno.h>
++#include <linux/jump_label.h>
++#include <linux/rcupdate.h>
++#include <linux/sched.h>
++#include <linux/sched/task.h>
++#include <linux/sched/user.h>
++#include <linux/user_namespace.h>
++#include <linux/version.h>
++#include <linux/pid.h>
++#include <linux/workqueue.h>
++
++#include "infra/symbol_resolver.h"
++#include "ksu_samsung_kdp.h"
++#include "klog.h"
++
++#ifdef CONFIG_KSU_SAMSUNG_KDP
++enum samsung_kdp_cred_command {
++	SAMSUNG_KDP_COPY_CREDS = 0,
++};
++
++typedef struct cred *(*prepare_ro_creds_t)(struct cred *cred, int command,
++					   u64 task);
++typedef void (*kdp_assign_pgd_t)(struct task_struct *task);
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
++typedef unsigned int (*kdp_usecount_sub_and_test_t)(int nr, struct cred *cred);
++#else
++typedef unsigned int (*kdp_usecount_dec_and_test_t)(struct cred *cred);
++#endif
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
++typedef long (*inc_rlimit_ucounts_t)(struct ucounts *ucounts,
++				     unsigned int type, long value);
++typedef bool (*dec_rlimit_ucounts_t)(struct ucounts *ucounts,
++				     unsigned int type, long value);
++#endif
++
++struct samsung_kdp_commit_work {
++	struct work_struct work;
++	struct completion completion;
++	struct task_struct *target;
++	const struct cred *old_cred;
++	struct cred *rw_cred;
++	int result;
++};
++
++static prepare_ro_creds_t prepare_ro_creds_fn;
++static kdp_assign_pgd_t kdp_assign_pgd_fn;
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
++static kdp_usecount_sub_and_test_t kdp_usecount_sub_and_test_fn;
++#else
++static kdp_usecount_dec_and_test_t kdp_usecount_dec_and_test_fn;
++#endif
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
++static inc_rlimit_ucounts_t inc_rlimit_ucounts_fn;
++static dec_rlimit_ucounts_t dec_rlimit_ucounts_fn;
++#endif
++
++/* Off = kernel without the KDP creds suite: plain cred paths are used.
++ * ksu_samsung_kdp_init() flips it on once every required symbol resolved;
++ * the inline gates in ksu_samsung_kdp.h are the single source of truth. */
++DEFINE_STATIC_KEY_FALSE(ksu_samsung_kdp_key);
++
++static void __nocfi samsung_kdp_commit_worker(struct work_struct *work)
++{
++	struct samsung_kdp_commit_work *commit_work =
++		container_of(work, struct samsung_kdp_commit_work, work);
++	struct task_struct *target = commit_work->target;
++	const struct cred *old_cred = commit_work->old_cred;
++	const struct cred *target_cred;
++	const struct cred *target_real_cred;
++	struct cred *ro_cred;
++	bool user_changed;
++
++	if (!uid_eq(current_euid(), GLOBAL_ROOT_UID)) {
++		commit_work->result = -EPERM;
++		goto out;
++	}
++	target_cred = rcu_access_pointer(target->cred);
++	target_real_cred = rcu_access_pointer(target->real_cred);
++	if (target_cred != old_cred || target_real_cred != old_cred) {
++		commit_work->result = -EBUSY;
++		goto out;
++	}
++
++	ro_cred = prepare_ro_creds_fn(commit_work->rw_cred,
++				      SAMSUNG_KDP_COPY_CREDS, (u64)target);
++	if (!ro_cred) {
++		commit_work->result = -EIO;
++		goto out;
++	}
++
++	user_changed = ro_cred->user != old_cred->user;
++	if (user_changed) {
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
++		inc_rlimit_ucounts_fn(ro_cred->ucounts, UCOUNT_RLIMIT_NPROC, 1);
++#else
++		atomic_inc(&ro_cred->user->processes);
++#endif
++	}
++	rcu_assign_pointer(target->real_cred, ro_cred);
++	rcu_assign_pointer(target->cred, ro_cred);
++	kdp_assign_pgd_fn(target);
++	if (user_changed) {
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
++		dec_rlimit_ucounts_fn(old_cred->ucounts, UCOUNT_RLIMIT_NPROC,
++				      1);
++#else
++		atomic_dec(&old_cred->user->processes);
++#endif
++	}
++
++	abort_creds(commit_work->rw_cred);
++	commit_work->rw_cred = NULL;
++	ksu_put_cred(old_cred);
++	ksu_put_cred(old_cred);
++	commit_work->result = 0;
++	pr_info("Samsung KDP credential install pid=%d uid=%u euid=%u\n",
++		task_pid_nr(target), __kuid_val(ro_cred->uid),
++		__kuid_val(ro_cred->euid));
++out:
++	complete(&commit_work->completion);
++}
++#endif
++
++/* Reached only via ksu_put_cred(): the key gate guarantees that every KDP
++ * helper below was resolved before init turned it on. */
++void __nocfi ksu_samsung_kdp_put_cred(const struct cred *cred)
++{
++#ifdef CONFIG_KSU_SAMSUNG_KDP
++	struct cred *mutable_cred = (struct cred *)cred;
++
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
++	if (mutable_cred && kdp_usecount_sub_and_test_fn(1, mutable_cred))
++#else
++	if (mutable_cred && kdp_usecount_dec_and_test_fn(mutable_cred))
++#endif
++		__put_cred(mutable_cred);
++#else
++	put_cred(cred);
++#endif
++}
++
++int ksu_samsung_kdp_init(void)
++{
++#ifdef CONFIG_KSU_SAMSUNG_KDP
++	prepare_ro_creds_fn =
++		(prepare_ro_creds_t)ksu_resolve_symbol_for_functable_hook(
++			"prepare_ro_creds");
++	kdp_assign_pgd_fn =
++		(kdp_assign_pgd_t)ksu_resolve_symbol_for_functable_hook(
++			"kdp_assign_pgd");
++	if (!prepare_ro_creds_fn || !kdp_assign_pgd_fn) {
++		pr_warn("Samsung KDP credential functions unavailable - plain credential handling\n");
++		return 0;
++	}
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
++	kdp_usecount_sub_and_test_fn = (kdp_usecount_sub_and_test_t)
++		ksu_resolve_symbol_for_functable_hook(
++			"kdp_usecount_sub_and_test");
++	if (!kdp_usecount_sub_and_test_fn) {
++		pr_warn("Samsung KDP credential functions unavailable - plain credential handling\n");
++		return 0;
++	}
++#else
++	kdp_usecount_dec_and_test_fn = (kdp_usecount_dec_and_test_t)
++		ksu_resolve_symbol_for_functable_hook(
++			"kdp_usecount_dec_and_test");
++	if (!kdp_usecount_dec_and_test_fn) {
++		pr_warn("Samsung KDP credential functions unavailable - plain credential handling\n");
++		return 0;
++	}
++#endif
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
++	inc_rlimit_ucounts_fn =
++		(inc_rlimit_ucounts_t)ksu_resolve_symbol_for_functable_hook(
++			"inc_rlimit_ucounts");
++	dec_rlimit_ucounts_fn =
++		(dec_rlimit_ucounts_t)ksu_resolve_symbol_for_functable_hook(
++			"dec_rlimit_ucounts");
++	if (!inc_rlimit_ucounts_fn || !dec_rlimit_ucounts_fn) {
++		pr_warn("Samsung KDP ucounts functions unavailable - plain credential handling\n");
++		return 0;
++	}
++#endif
++	static_branch_enable(&ksu_samsung_kdp_key);
++	pr_info("Samsung KDP credential compatibility enabled\n");
++#endif
++	return 0;
++}
++
++void ksu_samsung_kdp_exit(void)
++{
++}
++
++/* Reached only via ksu_commit_creds(): the key gate guarantees that the KDP
++ * helpers were resolved before init turned it on. */
++int ksu_samsung_kdp_commit_creds(struct cred *cred)
++{
++#ifdef CONFIG_KSU_SAMSUNG_KDP
++	struct samsung_kdp_commit_work commit_work;
++	bool queued;
++
++	if (!cred)
++		return -EINVAL;
++	INIT_WORK(&commit_work.work, samsung_kdp_commit_worker);
++	init_completion(&commit_work.completion);
++	commit_work.target = current;
++	commit_work.old_cred = current_real_cred();
++	commit_work.rw_cred = cred;
++	commit_work.result = -EIO;
++	get_task_struct(commit_work.target);
++	queued = schedule_work(&commit_work.work);
++	if (!queued) {
++		put_task_struct(commit_work.target);
++		return -EBUSY;
++	}
++	wait_for_completion(&commit_work.completion);
++	put_task_struct(commit_work.target);
++	return commit_work.result;
++#else
++	return commit_creds(cred);
++#endif
++}
+diff --git a/kernel/compat/samsung_rkp.c b/kernel/compat/samsung_rkp.c
+new file mode 100644
+index 0000000..7e0420e
+--- /dev/null
++++ b/kernel/compat/samsung_rkp.c
+@@ -0,0 +1,250 @@
++#include <asm/syscall.h>
++#include <linux/kprobes.h>
++#include <linux/ptrace.h>
++#include <linux/slab.h>
++#include <linux/task_work.h>
++
++#include "arch.h"
++#include "compat/samsung_rkp.h"
++#include "feature/sucompat.h"
++#include "hook/setuid_hook.h"
++#include "hook/syscall_event_bridge.h"
++#include "hook/syscall_hook.h"
++#include "klog.h"
++#include "policy/allowlist.h"
++
++#if defined(CONFIG_KSU_SAMSUNG_RKP) && defined(CONFIG_KRETPROBES) &&           \
++	defined(__aarch64__)
++#define SAMSUNG_RKP_BYPASS_NR (-2)
++
++struct samsung_setresuid_work {
++	struct callback_head callback;
++	uid_t old_uid;
++	uid_t new_uid;
++};
++
++static bool hooks_registered;
++static bool setresuid_registered;
++
++static bool consume_bypass(int syscall_nr)
++{
++	struct pt_regs *regs = task_pt_regs(current);
++
++	if (unlikely(regs->syscallno == SAMSUNG_RKP_BYPASS_NR)) {
++		regs->syscallno = syscall_nr;
++		return true;
++	}
++	return false;
++}
++
++static long __nocfi samsung_execve(const struct pt_regs *regs)
++{
++	struct pt_regs *syscall_regs = (struct pt_regs *)regs;
++	long ret;
++
++	syscall_regs->syscallno = SAMSUNG_RKP_BYPASS_NR;
++	ret = ksu_hook_execve(__NR_execve, regs);
++	syscall_regs->syscallno = __NR_execve;
++	return ret;
++}
++
++static long __nocfi samsung_execveat(const struct pt_regs *regs)
++{
++	struct pt_regs *syscall_regs = (struct pt_regs *)regs;
++	long ret;
++
++	syscall_regs->syscallno = SAMSUNG_RKP_BYPASS_NR;
++	ret = ksu_hook_execveat(__NR_execveat, regs);
++	syscall_regs->syscallno = __NR_execveat;
++	return ret;
++}
++
++static long __nocfi samsung_newfstatat(const struct pt_regs *regs)
++{
++	struct pt_regs *syscall_regs = (struct pt_regs *)regs;
++	long ret;
++
++	syscall_regs->syscallno = SAMSUNG_RKP_BYPASS_NR;
++	ret = ksu_hook_newfstatat(__NR_newfstatat, regs);
++	syscall_regs->syscallno = __NR_newfstatat;
++	return ret;
++}
++
++static long __nocfi samsung_faccessat(const struct pt_regs *regs)
++{
++	struct pt_regs *syscall_regs = (struct pt_regs *)regs;
++	long ret;
++
++	syscall_regs->syscallno = SAMSUNG_RKP_BYPASS_NR;
++	ret = ksu_hook_faccessat(__NR_faccessat, regs);
++	syscall_regs->syscallno = __NR_faccessat;
++	return ret;
++}
++
++static int execve_pre(struct kprobe *probe, struct pt_regs *regs)
++{
++	(void)probe;
++	if (consume_bypass(__NR_execve))
++		return 0;
++	instruction_pointer_set(regs, (unsigned long)samsung_execve);
++	return 1;
++}
++
++static int execveat_pre(struct kprobe *probe, struct pt_regs *regs)
++{
++	(void)probe;
++	if (consume_bypass(__NR_execveat))
++		return 0;
++	instruction_pointer_set(regs, (unsigned long)samsung_execveat);
++	return 1;
++}
++
++static int newfstatat_pre(struct kprobe *probe, struct pt_regs *regs)
++{
++	(void)probe;
++	if (consume_bypass(__NR_newfstatat))
++		return 0;
++	if (!READ_ONCE(ksu_su_compat_enabled) ||
++	    !ksu_is_allow_uid_for_current(current_uid().val))
++		return 0;
++	instruction_pointer_set(regs, (unsigned long)samsung_newfstatat);
++	return 1;
++}
++
++static int faccessat_pre(struct kprobe *probe, struct pt_regs *regs)
++{
++	(void)probe;
++	if (consume_bypass(__NR_faccessat))
++		return 0;
++	if (!READ_ONCE(ksu_su_compat_enabled) ||
++	    !ksu_is_allow_uid_for_current(current_uid().val))
++		return 0;
++	instruction_pointer_set(regs, (unsigned long)samsung_faccessat);
++	return 1;
++}
++
++static struct kprobe execve_kprobe = { .pre_handler = execve_pre };
++static struct kprobe execveat_kprobe = { .pre_handler = execveat_pre };
++static struct kprobe newfstatat_kprobe = { .pre_handler = newfstatat_pre };
++static struct kprobe faccessat_kprobe = { .pre_handler = faccessat_pre };
++
++static void setresuid_work(struct callback_head *callback)
++{
++	struct samsung_setresuid_work *work =
++		container_of(callback, struct samsung_setresuid_work, callback);
++
++	ksu_handle_setresuid(work->old_uid, work->new_uid);
++	kfree(work);
++}
++
++static int setresuid_entry(struct kretprobe_instance *ri, struct pt_regs *regs)
++{
++	(void)regs;
++	*(uid_t *)ri->data = current_uid().val;
++	return 0;
++}
++
++static int setresuid_return(struct kretprobe_instance *ri, struct pt_regs *regs)
++{
++	struct samsung_setresuid_work *work;
++	uid_t old_uid = *(uid_t *)ri->data;
++	uid_t new_uid;
++
++	if (regs_return_value(regs) < 0)
++		return 0;
++	new_uid = current_uid().val;
++	if (old_uid == new_uid)
++		return 0;
++
++	work = kzalloc(sizeof(*work), GFP_ATOMIC);
++	if (!work)
++		return 0;
++	work->old_uid = old_uid;
++	work->new_uid = new_uid;
++	work->callback.func = setresuid_work;
++	if (task_work_add(current, &work->callback, TWA_RESUME))
++		kfree(work);
++	return 0;
++}
++
++static struct kretprobe setresuid_kretprobe = {
++	.entry_handler = setresuid_entry,
++	.handler = setresuid_return,
++	.data_size = sizeof(uid_t),
++};
++
++static int register_syscall_kprobe(struct kprobe *probe, int nr)
++{
++	probe->addr = (kprobe_opcode_t *)READ_ONCE(ksu_syscall_table[nr]);
++	return register_kprobe(probe);
++}
++
++static void unregister_syscall_hooks(void)
++{
++	if (!hooks_registered)
++		return;
++	unregister_kprobe(&faccessat_kprobe);
++	unregister_kprobe(&newfstatat_kprobe);
++	unregister_kprobe(&execveat_kprobe);
++	unregister_kprobe(&execve_kprobe);
++	hooks_registered = false;
++}
++#endif
++
++int ksu_samsung_rkp_init(void)
++{
++#if defined(CONFIG_KSU_SAMSUNG_RKP) && defined(CONFIG_KRETPROBES) &&           \
++	defined(__aarch64__)
++	int ret;
++
++	if (!ksu_syscall_table)
++		return -ENOENT;
++	ret = register_syscall_kprobe(&execve_kprobe, __NR_execve);
++	if (ret)
++		return ret;
++	ret = register_syscall_kprobe(&execveat_kprobe, __NR_execveat);
++	if (ret)
++		goto unregister_execve;
++	ret = register_syscall_kprobe(&newfstatat_kprobe, __NR_newfstatat);
++	if (ret)
++		goto unregister_execveat;
++	ret = register_syscall_kprobe(&faccessat_kprobe, __NR_faccessat);
++	if (ret)
++		goto unregister_newfstatat;
++	hooks_registered = true;
++
++	setresuid_kretprobe.kp.addr =
++		(kprobe_opcode_t *)READ_ONCE(ksu_syscall_table[__NR_setresuid]);
++	ret = register_kretprobe(&setresuid_kretprobe);
++	if (ret)
++		goto unregister_all;
++	setresuid_registered = true;
++	pr_info("Samsung RKP syscall fallback enabled\n");
++	return 0;
++
++unregister_all:
++	unregister_syscall_hooks();
++	return ret;
++unregister_newfstatat:
++	unregister_kprobe(&newfstatat_kprobe);
++unregister_execveat:
++	unregister_kprobe(&execveat_kprobe);
++unregister_execve:
++	unregister_kprobe(&execve_kprobe);
++	return ret;
++#else
++	return -EOPNOTSUPP;
++#endif
++}
++
++void ksu_samsung_rkp_exit(void)
++{
++#if defined(CONFIG_KSU_SAMSUNG_RKP) && defined(CONFIG_KRETPROBES) &&           \
++	defined(__aarch64__)
++	if (setresuid_registered) {
++		unregister_kretprobe(&setresuid_kretprobe);
++		setresuid_registered = false;
++	}
++	unregister_syscall_hooks();
++#endif
++}
+diff --git a/kernel/compat/samsung_rkp.h b/kernel/compat/samsung_rkp.h
+new file mode 100644
+index 0000000..0f3b562
+--- /dev/null
++++ b/kernel/compat/samsung_rkp.h
+@@ -0,0 +1,7 @@
++#ifndef __KSU_SAMSUNG_RKP_H
++#define __KSU_SAMSUNG_RKP_H
++
++int ksu_samsung_rkp_init(void);
++void ksu_samsung_rkp_exit(void);
++
++#endif
+diff --git a/kernel/core/init.c b/kernel/core/init.c
+index 09d4333..d835dc6 100644
+--- a/kernel/core/init.c
++++ b/kernel/core/init.c
+@@ -64,6 +64,8 @@ int kernelsu_init(void);
+ #include "kasumi_bootstrap.h"
+ #include "hook/lsm_hook.h"
+ #include "infra/symbol_resolver.h"
++#include "compat/samsung_defex.h"
++#include "ksu_samsung_kdp.h"
+ #include "klog.h" // IWYU pragma: keep
+ #include "ksu.h"
+ #include "runtime/ksud_boot.h"
+@@ -170,16 +172,31 @@ int __init kernelsu_init(void)
+ 
+ 	ksu_init_symbol_resolver();
+ 
+-	ret = ksu_selinux_inode_init();
++	ret = ksu_samsung_kdp_init();
+ 	if (ret)
+ 		return ret;
+ 
++	ret = ksu_selinux_inode_init();
++	if (ret) {
++		ksu_samsung_kdp_exit();
++		return ret;
++	}
++
+ 	ksu_cred = prepare_creds();
+ 	if (!ksu_cred) {
+ 		pr_err("prepare cred failed!\n");
++		ksu_samsung_kdp_exit();
+ 		return -ENOMEM;
+ 	}
+ 
++	ret = ksu_samsung_defex_init();
++	if (ret) {
++		ksu_put_cred(ksu_cred);
++		ksu_cred = NULL;
++		ksu_samsung_kdp_exit();
++		return ret;
++	}
++
+ 	uts_boot_requested = ksu_uts_view_boot_requested();
+ 	ret = ksu_uts_view_init();
+ 	if (ret) {
+@@ -324,10 +341,12 @@ static void kernelsu_exit(void)
+ 	/* Module references drop before task-work callback epilogues return. */
+ 	synchronize_rcu_tasks();
+ 
++	ksu_samsung_defex_exit();
+ 	if (ksu_cred) {
+-		put_cred(ksu_cred);
++		ksu_put_cred(ksu_cred);
+ 		ksu_cred = NULL;
+ 	}
++	ksu_samsung_kdp_exit();
+ }
+ 
+ #if NEED_OWN_STACKPROTECTOR
+diff --git a/kernel/hook/arm64/patch_memory.c b/kernel/hook/arm64/patch_memory.c
+index 541b0cf..bb646e0 100644
+--- a/kernel/hook/arm64/patch_memory.c
++++ b/kernel/hook/arm64/patch_memory.c
+@@ -145,6 +145,11 @@ static int ksu_patch_text_cb(void *arg)
+ 
+ int ksu_patch_text(void *dst, void *src, size_t len, int flags)
+ {
++#ifdef CONFIG_KSU_SAMSUNG_NO_PATCH_TEXT
++	pr_warn("live patching disabled on Samsung EL2: dst=0x%lx len=%zu flags=0x%x\n",
++		(unsigned long)dst, len, flags);
++	return -EOPNOTSUPP;
++#else
+ 	int ret;
+ 	struct patch_text_info info = {
+ 	    .dst = dst,
+@@ -159,6 +164,7 @@ int ksu_patch_text(void *dst, void *src, size_t len, int flags)
+ 		pr_err("failed to patch kernel address 0x%lx: %d\n",
+ 		       (unsigned long)dst, ret);
+ 	return ret;
++#endif
+ }
+ 
+ /*
+diff --git a/kernel/hook/arm64/syscall_hook.c b/kernel/hook/arm64/syscall_hook.c
+index c32c829..ca6d36f 100644
+--- a/kernel/hook/arm64/syscall_hook.c
++++ b/kernel/hook/arm64/syscall_hook.c
+@@ -239,7 +239,12 @@ int ksu_syscall_hook_init(void)
+ 	    ksu_dispatcher_nr, (syscall_fn_t)ksu_syscall_dispatcher, NULL);
+ 	if (ret) {
+ 		ksu_dispatcher_nr = -1;
++#ifdef CONFIG_KSU_SAMSUNG_RKP
++		pr_warn("dispatcher slot is protected; using Samsung RKP fallback hooks\n");
++		return 0;
++#else
+ 		return ret;
++#endif
+ 	}
+ 
+ 	pr_info("dispatcher installed at slot %d\n", ksu_dispatcher_nr);
+diff --git a/kernel/hook/syscall_hook_manager.c b/kernel/hook/syscall_hook_manager.c
+index 36bfef7..61386b8 100644
+--- a/kernel/hook/syscall_hook_manager.c
++++ b/kernel/hook/syscall_hook_manager.c
+@@ -24,6 +24,10 @@
+ #include "feature/sucompat.h"
+ #include "hook/syscall_hook_manager.h"
+ #include "hook/tp_marker.h"
++#include "compat/samsung_rkp.h"
++
++static bool syscall_hook_manager_initialized;
++static bool samsung_rkp_initialized;
+ 
+ // ---------------------------------------------------------------
+ // Tracepoint redirect handler
+@@ -96,6 +100,21 @@ void ksu_syscall_hook_manager_init(void)
+ 
+ 	pr_info("hook_manager: initializing TSR hook manager\n");
+ 
++	if (ksu_dispatcher_nr < 0) {
++		ret = ksu_samsung_rkp_init();
++		if (ret) {
++			pr_err("hook_manager: Samsung RKP fallback unavailable: %d\n",
++			       ret);
++			return;
++		}
++		samsung_rkp_initialized = true;
++		ksu_setuid_hook_init();
++		ksu_sucompat_init();
++		return;
++	}
++
++	syscall_hook_manager_initialized = true;
++
+ 	/* Initialize tracepoint marker (kretprobes + process marking) */
+ 	ksu_tp_marker_init();
+ 
+@@ -126,6 +145,16 @@ void ksu_syscall_hook_manager_init(void)
+ void ksu_syscall_hook_manager_exit(void)
+ {
+ 	pr_info("hook_manager: cleaning up TSR hook manager\n");
++	if (!syscall_hook_manager_initialized) {
++		if (samsung_rkp_initialized) {
++			ksu_samsung_rkp_exit();
++			ksu_sucompat_exit();
++			ksu_setuid_hook_exit();
++			samsung_rkp_initialized = false;
++		}
++		ksu_syscall_hook_exit();
++		return;
++	}
+ 	/*
+ 	 * Withdraw the vnode provider while the exec route can still recognize
+ 	 * already-open vnode fds and fail them closed.
+diff --git a/kernel/hook/tp_marker.c b/kernel/hook/tp_marker.c
+index 7ba04db..b6d22f5 100644
+--- a/kernel/hook/tp_marker.c
++++ b/kernel/hook/tp_marker.c
+@@ -17,6 +17,7 @@
+ #include <linux/version.h>
+ 
+ #include "policy/allowlist.h"
++#include "ksu_samsung_kdp.h"
+ #include "klog.h" // IWYU pragma: keep
+ #include "hook/tp_marker.h"
+ 
+@@ -85,7 +86,7 @@ static void ksu_mark_running_process_locked(void)
+ 		} else {
+ 			ksu_clear_task_tracepoint_flag(t);
+ 		}
+-		put_cred(cred);
++		ksu_put_cred(cred);
+ 	}
+ 	read_unlock(&tasklist_lock);
+ }
+diff --git a/kernel/include/ksu_samsung_kdp.h b/kernel/include/ksu_samsung_kdp.h
+new file mode 100644
+index 0000000..a34ec1d
+--- /dev/null
++++ b/kernel/include/ksu_samsung_kdp.h
+@@ -0,0 +1,49 @@
++#ifndef __KSU_SAMSUNG_KDP_H
++#define __KSU_SAMSUNG_KDP_H
++
++#include <linux/cred.h>
++#include <linux/jump_label.h>
++
++int ksu_samsung_kdp_init(void);
++void ksu_samsung_kdp_exit(void);
++int ksu_samsung_kdp_commit_creds(struct cred *cred);
++
++#ifdef CONFIG_KSU_SAMSUNG_KDP
++
++/* Capability gate for the Samsung KDP creds suite.  Off = this kernel has
++ * no KDP functions and every caller falls back to the plain cred helpers;
++ * ksu_samsung_kdp_init() flips it on once, after resolving every symbol. */
++extern struct static_key_false ksu_samsung_kdp_key;
++
++void ksu_samsung_kdp_put_cred(const struct cred *cred);
++
++static inline int ksu_commit_creds(struct cred *cred)
++{
++	if (static_branch_unlikely(&ksu_samsung_kdp_key))
++		return ksu_samsung_kdp_commit_creds(cred);
++	return commit_creds(cred);
++}
++
++static inline void ksu_put_cred(const struct cred *cred)
++{
++	if (static_branch_unlikely(&ksu_samsung_kdp_key))
++		ksu_samsung_kdp_put_cred(cred);
++	else
++		put_cred(cred);
++}
++
++#else
++
++static inline int ksu_commit_creds(struct cred *cred)
++{
++	return commit_creds(cred);
++}
++
++static inline void ksu_put_cred(const struct cred *cred)
++{
++	put_cred(cred);
++}
++
++#endif
++
++#endif
+diff --git a/kernel/policy/app_profile.c b/kernel/policy/app_profile.c
+index 2ee926e..784ccaf 100644
+--- a/kernel/policy/app_profile.c
++++ b/kernel/policy/app_profile.c
+@@ -21,6 +21,8 @@
+ #include "feature/sucompat.h"
+ #include "hook/syscall_hook_manager.h"
+ #include "infra/su_mount_ns.h"
++#include "compat/samsung_defex.h"
++#include "ksu_samsung_kdp.h"
+ 
+ #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 7, 0)
+ static struct group_info root_groups = {
+@@ -326,7 +328,13 @@ int escape_with_root_profile(void)
+ 		return 0;
+ 	}
+ 
+-	commit_creds(cred);
++	ret = ksu_commit_creds(cred);
++	if (ret) {
++		pr_err("Samsung KDP credential install failed: %d\n", ret);
++		abort_creds(cred);
++		return ret;
++	}
++	ksu_samsung_defex_sync_current();
+ 	(void)ksu_finalize_root_profile_common(&state, false);
+ 	return 0;
+ }
+@@ -342,6 +350,7 @@ void escape_to_root_for_init(void)
+ 
+ 	(void)setup_selinux(KERNEL_SU_CONTEXT, cred);
+ 	commit_creds(cred);
++	ksu_samsung_defex_sync_current();
+ }
+ 
+ void __init ksu_app_profile_init(void)
