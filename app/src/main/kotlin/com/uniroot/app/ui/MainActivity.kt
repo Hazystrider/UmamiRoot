@@ -254,6 +254,7 @@ class MainActivity : ComponentActivity(), Shizuku.OnRequestPermissionResultListe
                         ksudUpdateProgress = 0
                         ksudUpdateStage = ""
                         ksudUpdateSheetVisible = true
+                        val selectedManager = engine.selectedKernelManager()
                         val targetFlavor = when (ksuFlavor) {
                             "sukisu_nova" -> com.uniroot.app.newmethod.DfKsudUpdater.Flavor.SUKISU_NOVA
                             "yukisu" -> com.uniroot.app.newmethod.DfKsudUpdater.Flavor.YUKISU
@@ -263,8 +264,9 @@ class MainActivity : ComponentActivity(), Shizuku.OnRequestPermissionResultListe
                         lifecycleScope.launch {
                             val result = runCatching {
                                 withContext(Dispatchers.IO) {
-                                    com.uniroot.app.newmethod.DfKsudUpdater.run(
+                                    com.uniroot.app.newmethod.DfKsudUpdater.runForManager(
                                         this@MainActivity,
+                                        selectedManager,
                                         targetFlavor,
                                         { line ->
                                             ksudUpdateLog += line + "\n"

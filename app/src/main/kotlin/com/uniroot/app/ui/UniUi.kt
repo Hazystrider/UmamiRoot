@@ -715,14 +715,21 @@ private fun UniKsudUpdateSheet(
     state: UniUiState,
     actions: UniActions,
 ) {
+    val selectedMgr = KernelManagerType.fromId(state.kernelManagerId)
+    val sheetTitle = if (selectedMgr != KernelManagerType.AUTO &&
+        selectedMgr != KernelManagerType.CUSTOM &&
+        selectedMgr != KernelManagerType.XECKERNEL
+    ) {
+        "Update ${selectedMgr.displayName} ksud"
+    } else when (state.ksuFlavor) {
+        "sukisu_nova" -> "Update ksud SukiSU-Nova"
+        "yukisu" -> "Update ksud YukiSU"
+        "kernelsu_next" -> "Update ksud Next"
+        else -> "Update ksud classic"
+    }
     OverlayBottomSheet(
         show = state.ksudUpdateSheetVisible,
-        title = when (state.ksuFlavor) {
-            "sukisu_nova" -> "Update ksud SukiSU-Nova"
-            "yukisu" -> "Update ksud YukiSU"
-            "kernelsu_next" -> "Update ksud Next"
-            else -> "Update ksud classic"
-        },
+        title = sheetTitle,
         allowDismiss = !state.ksudUpdateRunning,
         onDismissRequest = actions::onCloseKsudUpdateSheet,
         endAction = {
@@ -1084,15 +1091,22 @@ private fun ControlPanel(
                     .padding(vertical = 14.dp),
                 contentAlignment = androidx.compose.ui.Alignment.Center,
             ) {
+                val selectedMgr = KernelManagerType.fromId(state.kernelManagerId)
+                val updateLabel = if (state.ksudUpdateRunning) {
+                    "Updating ksud…"
+                } else if (selectedMgr != KernelManagerType.AUTO &&
+                    selectedMgr != KernelManagerType.CUSTOM &&
+                    selectedMgr != KernelManagerType.XECKERNEL
+                ) {
+                    "⬇  Update ${selectedMgr.displayName} ksud"
+                } else when (state.ksuFlavor) {
+                    "sukisu_nova" -> "⬇  Update ksud SukiSU-Nova"
+                    "yukisu" -> "⬇  Update ksud YukiSU"
+                    "kernelsu_next" -> "⬇  Update ksud Next"
+                    else -> "⬇  Update ksud classic"
+                }
                 Text(
-                    text = if (state.ksudUpdateRunning) {
-                        "Updating ksud…"
-                    } else when (state.ksuFlavor) {
-                        "sukisu_nova" -> "⬇  Update ksud SukiSU-Nova"
-                        "yukisu" -> "⬇  Update ksud YukiSU"
-                        "kernelsu_next" -> "⬇  Update ksud Next"
-                        else -> "⬇  Update ksud classic"
-                    },
+                    text = updateLabel,
                     color = MiuixTheme.colorScheme.onPrimary,
                     fontSize = 15.sp,
                     fontWeight = FontWeight.SemiBold,

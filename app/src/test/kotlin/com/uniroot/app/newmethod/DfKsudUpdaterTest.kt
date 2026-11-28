@@ -305,6 +305,14 @@ class DfKsudUpdaterTest {
         assertEquals("YukiSU_v1.9.0_10700-arm64-v8a-release.apk", pick?.name)
     }
 
+    @Test
+    fun formatsThirdPartyManagerProfileIds() {
+        assertEquals("3.4.0-bakasu-kdp", DfKsudUpdater.managerProfileId("bakasu", "v3.4.0"))
+        assertEquals("1.2.0-rksu_wildksu-kdp", DfKsudUpdater.managerProfileId("rksu_wildksu", "1.2.0"))
+        val parsed = KsudNextProfiles.parseProfileId("3.4.0-bakasu-kdp")
+        assertEquals("3.4.0 · bakasu-kdp", parsed.label)
+    }
+
     private data class Embedded(
         val start: Int,
         val consumed: Int,

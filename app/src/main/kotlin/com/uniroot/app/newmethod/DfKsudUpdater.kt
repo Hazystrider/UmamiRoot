@@ -296,6 +296,139 @@ object DfKsudUpdater {
         onProgress = onProgress,
     )
 
+    fun runForManager(
+        context: Context,
+        manager: com.uniroot.app.engine.KernelManagerType,
+        activeFlavor: Flavor,
+        onLog: (String) -> Unit,
+        onProgress: (Int, String) -> Unit = { _, _ -> },
+    ): String = when (manager) {
+        com.uniroot.app.engine.KernelManagerType.AUTO,
+        com.uniroot.app.engine.KernelManagerType.CUSTOM,
+        com.uniroot.app.engine.KernelManagerType.XECKERNEL ->
+            run(context, activeFlavor, onLog, onProgress)
+        com.uniroot.app.engine.KernelManagerType.KERNELSU ->
+            run(context, Flavor.CLASSIC, onLog, onProgress)
+        com.uniroot.app.engine.KernelManagerType.KERNELSU_NEXT ->
+            run(context, Flavor.NEXT, onLog, onProgress)
+        com.uniroot.app.engine.KernelManagerType.SUKISU_NOVA ->
+            run(context, Flavor.SUKISU_NOVA, onLog, onProgress)
+        com.uniroot.app.engine.KernelManagerType.YUKISU ->
+            run(context, Flavor.YUKISU, onLog, onProgress)
+        else -> runThirdPartyManager(context, manager, activeFlavor, onLog, onProgress)
+    }
+
+    /**
+     * Pulls the selected third-party manager's latest `ksud` from GitHub and
+     * applies the exact same raw-DEFLATE scan + reference `.ko` hash resolution +
+     * Samsung KDP+DEFEX `.ko` in-place blob patching + re-scan verification as
+     * KernelSU Next.
+     */
+    private fun runThirdPartyManager(
+        context: Context,
+        manager: com.uniroot.app.engine.KernelManagerType,
+        activeFlavor: Flavor,
+        onLog: (String) -> Unit,
+        onProgress: (Int, String) -> Unit,
+    ): String {
+        log = onLog
+        val progress: (Int, String) -> Unit = { pct, stage -> onProgress(pct, stage) }
+        progress(5, "Looking for latest ${manager.displayName} ksud…")
+        say("[*] Looking for latest ${manager.displayName} release…")
+
+        val tmpKsud = File(context.cacheDir, "ksud-mgr-${manager.id}.tmp")
+        val fetched = try {
+            progress(20, "Downloading ${manager.displayName} ksud…")
+            ManagerReleaseFetcher.fetchLatest(
+                context = context,
+                manager = manager,
+                destFile = tmpKsud,
+                log = { say("[*] $it") },
+            )
+        } catch (e: Throwable) {
+            tmpKsud.delete()
+            throw e
+        }
+
+        val rawKsud = try {
+            tmpKsud.readBytes()
+        } finally {
+            tmpKsud.delete()
+        }
+        say("[*] Downloaded ${fetched.assetName} (${fetched.tag}, ${rawKsud.size} bytes) from ${fetched.repo}")
+
+        val finalBytes = if (fetched.kdpTagged) {
+            progress(80, "Verifying KDP-tagged ksud…")
+            say("[*] Asset is already Samsung KDP-tagged — skipping on-device .ko injection")
+            rawKsud
+        } else {
+            // Check if the binary has raw-DEFLATE embedded kernelsu.ko streams
+            // (same rust-embed + include-flate layout as KernelSU / KernelSU Next).
+            progress(35, "Scanning embedded kernel modules…")
+            val preScan = scanStreams(rawKsud).toMutableList()
+            classify(preScan, emptyMap())
+            val koCount = preScan.count { it.kind == "ko" }
+            if (koCount == 0) {
+                say("[!] ${manager.displayName} ksud has 0 raw-DEFLATE kernelsu.ko slots — saving binary as-is")
+                rawKsud
+            } else {
+                say("[*] Found $koCount embedded kernelsu.ko slots — applying Samsung KDP+DEFEX blob patch…")
+                val refBase = "https://github.com/${fetched.repo}/releases/download/${fetched.tag}"
+                progress(45, "Downloading reference kos…")
+                val refHashes = HashMap<String, String>()
+                for (kmi in KMIS) {
+                    val bytes = runCatching { httpGet("$refBase/aarch64_${kmi}_kernelsu.ko") }
+                        .recoverCatching { httpGet("$refBase/lkm-aarch64-${kmi}_kernelsu.ko") }
+                        .recoverCatching { httpGet("$refBase/aarch64-${kmi}_kernelsu.ko") }
+                        .recoverCatching { httpGet("$refBase/${kmi}_kernelsu.ko") }
+                        .getOrNull()
+                    if (bytes != null) refHashes[sha256Hex(bytes)] = kmi
+                }
+                say("    ${refHashes.size}/8 references loaded")
+
+                val useClassicKos = activeFlavor == Flavor.CLASSIC
+                val koDir = if (useClassicKos) KO_ASSET_DIR_CLASSIC else KO_ASSET_DIR
+                val koAssets = runCatching { context.assets.list(koDir)?.toList() ?: emptyList() }
+                    .getOrDefault(emptyList())
+                val replacements = HashMap<String, ByteArray>()
+                for (kmi in KMIS) {
+                    val name = koAssets.firstOrNull { it.startsWith("${kmi}_kernelsu") && it.endsWith(".ko") }
+                        ?: throw IllegalStateException("Samsung ko missing from APK: $kmi")
+                    replacements[kmi] = context.assets.open("$koDir/$name").use { it.readBytes() }
+                }
+                patchAssets(rawKsud, replacements, refHashes, progress, requireAllModules = false)
+            }
+        }
+
+        val profileId = managerProfileId(manager.id, fetched.tag)
+        val note = "${manager.displayName} ${fetched.tag} + Samsung KDP+DEFEX kos (${fetched.repo})"
+        return if (activeFlavor == Flavor.CLASSIC) {
+            File(context.filesDir, "ksud-classic-latest").writeBytes(finalBytes)
+            File(context.filesDir, "ksud-classic-latest.tag").writeText("${manager.id}-${fetched.tag}")
+            KsudClassicProfiles.selectLatest(context, profileId, note)
+            say("[+] Classic profile '$profileId' saved and SELECTED")
+            progress(100, "Done: ${manager.displayName} ${fetched.tag} patched")
+            "OK: ${manager.displayName} ${fetched.tag} patched -> '$profileId'"
+        } else {
+            if (alreadyUpdatedNext(context, profileId, finalBytes)) {
+                KsudNextProfiles.setSelected(context, profileId)
+                progress(100, "you are already updated")
+                say("you are already updated")
+                say("    (${manager.displayName} ${fetched.tag} is already patched: profile '$profileId')")
+                return "you are already updated (${manager.displayName} ${fetched.tag})"
+            }
+            KsudNextProfiles.addDynamic(context, profileId, finalBytes, note)
+            say("[+] Profile '$profileId' created and SELECTED")
+            progress(100, "Done")
+            "OK: ${manager.displayName} ${fetched.tag} patched -> profile '$profileId'"
+        }
+    }
+
+    internal fun managerProfileId(managerId: String, tag: String): String {
+        val ver = tag.trim().removePrefix("v")
+        return "$ver-${managerId.lowercase()}-kdp"
+    }
+
     fun run(
         context: Context,
         flavor: Flavor,

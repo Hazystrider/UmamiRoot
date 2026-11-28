@@ -3,6 +3,12 @@
 All notable changes to **UmamiRoot** are documented in this file.
 Versioning follows [Semantic Versioning](https://semver.org/) (`MAJOR.MINOR.PATCH`).
 
+## [6.3.0] - 2026-11-28
+
+### Added
+- Manager-aware `DfKsudUpdater.runForManager`: the top **Update ksud** button now pulls the selected kernel manager's `ksud` (KernelSU, KernelSU Next, SukiSU-Nova, YukiSU, BakaSU, RKSU/WildKSU, KowSU) and applies the same raw-DEFLATE scan, reference `.ko` hash classification, in-place Samsung KDP+DEFEX blob injection, and re-scan verification as KernelSU Next.
+- Dynamic button & progress sheet titles reflecting the selected kernel manager.
+
 ## [6.2.1] - 2026-11-28
 
 ### Fixed
